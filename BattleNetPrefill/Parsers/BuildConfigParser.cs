@@ -6,11 +6,38 @@
         {
             var buildConfig = new BuildConfigFile();
 
-            string content = Encoding.UTF8.GetString(await cdnRequestManager.GetRequestAsBytesAsync(RootFolder.config, versionsEntry.buildConfig));
+            // Diagnostics: capture the exact lancache target + URL this request routes through, so a
+            // wrong-IP / lancache-misconfig is obvious from the daemon log when the read fails. The
+            // daemon rewrites every CDN request to http://{LANCACHE_IP}/<path> with a Host header of
+            // the CDN host - if LANCACHE_IP points at something that isn't a lancache (e.g. the
+            // lancache-manager app), this read returns non-CDN content and we fail below.
+            string buildConfigUrl = cdnRequestManager.BuildRequestUrl(RootFolder.config, versionsEntry.buildConfig);
+            string lancacheAddress = cdnRequestManager.LancacheAddress;
+
+            string content;
+            try
+            {
+                content = Encoding.UTF8.GetString(await cdnRequestManager.GetRequestAsBytesAsync(RootFolder.config, versionsEntry.buildConfig));
+            }
+            catch (Exception ex)
+            {
+                throw new Exception(
+                    $"Error reading build config! Request to lancache '{lancacheAddress}' failed " +
+                    $"(URL '{buildConfigUrl}', Host header '{cdnRequestManager.CurrentCdn}'). " +
+                    $"Verify LANCACHE_IP points at a real lancache cache server. Underlying error: {ex.Message}", ex);
+            }
 
             if (string.IsNullOrEmpty(content) || !content.StartsWith("# Build"))
             {
-                throw new Exception("Error reading build config!");
+                var preview = string.IsNullOrEmpty(content)
+                    ? "<empty response>"
+                    : content.Substring(0, Math.Min(120, content.Length)).Replace("\n", " ").Replace("\r", " ");
+                throw new Exception(
+                    $"Error reading build config! Got a non-CDN response from lancache '{lancacheAddress}' " +
+                    $"(URL '{buildConfigUrl}', Host header '{cdnRequestManager.CurrentCdn}'). " +
+                    $"Expected content starting with '# Build' but got: \"{preview}\". " +
+                    $"This usually means LANCACHE_IP points at something that is NOT a lancache cache " +
+                    $"(e.g. the lancache-manager app) - set it to your real lancache server IP.");
             }
 
             var lines = content.Split("\n", StringSplitOptions.RemoveEmptyEntries);

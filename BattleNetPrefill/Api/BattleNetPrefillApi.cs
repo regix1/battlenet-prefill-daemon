@@ -281,7 +281,17 @@ public sealed class BattleNetPrefillApi : IDisposable
             }
             catch (Exception ex)
             {
-                _progress.OnLog(LogLevel.Warning, $"Failed to get size for {product.DisplayName}: {ex.Message}");
+                // Surface the lancache target so a wrong-IP / lancache-misconfig is obvious from the
+                // daemon log. The build-config read (and thus the size estimate) is routed through
+                // LANCACHE_IP; if that points at something that is not a lancache cache (e.g. the
+                // lancache-manager app), this fails with "Error reading build config!".
+                var lancacheIp = Environment.GetEnvironmentVariable("LANCACHE_IP");
+                var lancacheInfo = string.IsNullOrWhiteSpace(lancacheIp)
+                    ? "LANCACHE_IP not set (using DNS auto-detect)"
+                    : $"LANCACHE_IP={lancacheIp}";
+                var inner = ex.InnerException != null ? $" | Inner: {ex.InnerException.Message}" : string.Empty;
+                _progress.OnLog(LogLevel.Warning,
+                    $"Failed to get size for {product.DisplayName} [{lancacheInfo}]: {ex.Message}{inner}");
                 return 0;
             }
         }

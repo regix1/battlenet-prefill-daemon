@@ -21,6 +21,28 @@
         private string _lancacheAddress;
 
         /// <summary>
+        /// The lancache server IP/host all CDN requests are routed through (URL-rewrite + Host-header spoof).
+        /// Exposed for diagnostics so a wrong / misconfigured lancache target is obvious in the log when a
+        /// request fails (e.g. "Error reading build config!").
+        /// </summary>
+        public string LancacheAddress => _lancacheAddress;
+
+        /// <summary>
+        /// The CDN host name currently being spoofed as the request's Host header. Diagnostics only.
+        /// </summary>
+        public string CurrentCdn => _currentCdn;
+
+        /// <summary>
+        /// Builds the absolute URL a request would be sent to (lancache IP + product path + hash).
+        /// Diagnostics only - mirrors how <see cref="GetRequestAsBytesAsync"/> forms its URL.
+        /// </summary>
+        public string BuildRequestUrl(RootFolder rootPath, MD5Hash hash, bool isIndex = false)
+        {
+            var request = new Request(_productBasePath, rootPath, hash, isIndex: isIndex);
+            return $"http://{_lancacheAddress}/{request.Uri}";
+        }
+
+        /// <summary>
         /// The root path used to find the product's data on the CDN.  Must be queried from the patch API.
         /// </summary>
         private string _productBasePath;
