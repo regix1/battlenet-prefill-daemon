@@ -1,4 +1,5 @@
-﻿global using BattleNetPrefill.EncryptDecrypt;
+﻿global using BattleNetPrefill.Api;
+global using BattleNetPrefill.EncryptDecrypt;
 global using BattleNetPrefill.Extensions;
 global using BattleNetPrefill.Handlers;
 global using BattleNetPrefill.Parsers;

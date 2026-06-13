@@ -365,7 +365,7 @@ public sealed class BattleNetPrefillApi : IDisposable
             };
         }
 
-        var handler = new TactProductHandler(_console, forcePrefill: options.Force);
+        var handler = new TactProductHandler(_console, forcePrefill: options.Force, progress: _progress);
 
         var updated = 0;
         var alreadyUpToDate = 0;
@@ -377,14 +377,19 @@ public sealed class BattleNetPrefillApi : IDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var appInfo = new AppDownloadInfo { AppId = product.ProductCode, Name = product.DisplayName };
+                // Best-effort up-front total for the app-level "started" broadcast: reuse any size estimate a
+                // prior status poll already cached (version-keyed, read-only — does NOT touch AppConfig.SkipDownloads).
+                // The authoritative remaining-total is emitted by the handler's "preparing" progress once the
+                // request queue is coalesced; this just gives OnAppStarted a non-zero total when available.
+                var cachedTotal = _downloadSizeCache.TryGetValue(BuildSizeCacheKey(product.ProductCode), out var estTotal) ? estTotal : 0;
+                var appInfo = new AppDownloadInfo { AppId = product.ProductCode, Name = product.DisplayName, TotalBytes = cachedTotal };
                 _progress.OnAppStarted(appInfo);
 
                 var versionBefore = ReadPrefillMarker(product.ProductCode);
 
                 try
                 {
-                    await handler.ProcessProductAsync(product);
+                    await handler.ProcessProductAsync(product, cancellationToken);
 
                     var versionAfter = ReadPrefillMarker(product.ProductCode);
 

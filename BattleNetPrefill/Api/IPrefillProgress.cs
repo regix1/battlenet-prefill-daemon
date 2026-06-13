@@ -42,6 +42,13 @@ public class DownloadProgressInfo
     public double PercentComplete => TotalBytes > 0 ? (double)BytesDownloaded / TotalBytes * 100 : 0;
     public double BytesPerSecond { get; init; }
     public TimeSpan Elapsed { get; init; }
+
+    /// <summary>
+    /// Socket state to broadcast for this update. Defaults to "downloading" (live byte transfer).
+    /// The pre-transfer phase (metadata / building archive indexes / determining files) emits
+    /// "preparing" so the UI shows activity (and the known total) before the first byte flows.
+    /// </summary>
+    public string State { get; init; } = "downloading";
 }
 
 public enum AppDownloadResult

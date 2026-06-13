@@ -4,13 +4,15 @@
     {
         private readonly IAnsiConsole _ansiConsole;
         private readonly bool _forcePrefill;
+        private readonly IPrefillProgress _progress;
 
         private readonly PrefillSummaryResult _prefillSummaryResult = new PrefillSummaryResult();
 
-        public TactProductHandler(IAnsiConsole ansiConsole, bool forcePrefill = false)
+        public TactProductHandler(IAnsiConsole ansiConsole, bool forcePrefill = false, IPrefillProgress? progress = null)
         {
             _ansiConsole = ansiConsole;
             _forcePrefill = forcePrefill;
+            _progress = progress ?? NullProgress.Instance;
         }
 
         /// <summary>
@@ -72,12 +74,15 @@
         /// <summary>
         /// Downloads a specified game, in the same manner that Battle.net does.  Should be used to pre-fill a LanCache with game data from Blizzard's CDN.
         /// </summary>
-        public async Task<ComparisonResult> ProcessProductAsync(TactProduct product)
+        public async Task<ComparisonResult> ProcessProductAsync(TactProduct product, CancellationToken cancellationToken = default)
         {
             var metadataTimer = Stopwatch.StartNew();
 
-            // Initializing classes, now that we have our CDN info loaded
-            using var cdnRequestManager = new CdnRequestManager(_ansiConsole);
+            // Initializing classes, now that we have our CDN info loaded.
+            // The size-only pass (AppConfig.SkipDownloads) uses NullProgress so no download progress is emitted;
+            // a real prefill passes the live socket sink + app identity so the UI gets preparing/byte progress.
+            var progressSink = AppConfig.SkipDownloads ? NullProgress.Instance : _progress;
+            using var cdnRequestManager = new CdnRequestManager(_ansiConsole, progressSink, product.ProductCode, product.DisplayName);
             var downloadFileHandler = new DownloadFileHandler(cdnRequestManager);
             var configFileHandler = new ConfigFileHandler(cdnRequestManager);
             var installFileHandler = new InstallFileHandler(cdnRequestManager);
@@ -118,7 +123,7 @@
             _ansiConsole.LogMarkupLine("Retrieved product metadata", metadataTimer);
 
             // Actually start the download of any deferred requests
-            var downloadSuccessful = await cdnRequestManager.DownloadQueuedRequestsAsync(_prefillSummaryResult);
+            var downloadSuccessful = await cdnRequestManager.DownloadQueuedRequestsAsync(_prefillSummaryResult, cancellationToken);
 
             // TODO I don't like the way that this has to be written just to get the debug output working.
             if (AppConfig.CompareAgainstRealRequests)

@@ -389,19 +389,26 @@ public sealed class SocketCommandInterface : IDisposable
         public void OnDownloadProgress(DownloadProgressInfo progress)
         {
             var now = DateTime.UtcNow;
-            if (now - _lastProgressBroadcast < BroadcastThrottle)
-                return;
 
-            _lastProgressBroadcast = now;
+            // "preparing" is a single, low-frequency state-transition emit (one per product, before the
+            // transfer loop) carrying the up-front total — never throttle it away, or the UI would miss the
+            // "0 B / <total>" hand-off. Only the high-frequency "downloading" byte stream is throttled.
+            var isDownloading = progress.State == "downloading";
+            if (isDownloading)
+            {
+                if (now - _lastProgressBroadcast < BroadcastThrottle)
+                    return;
+                _lastProgressBroadcast = now;
+            }
 
             var downloadedStr = FormatBytes(progress.BytesDownloaded);
             var totalStr = FormatBytes(progress.TotalBytes);
             var speedStr = FormatBytes((long)progress.BytesPerSecond) + "/s";
-            OnLog(LogLevel.Info, $"{progress.AppName}: {progress.PercentComplete:F1}% - {speedStr} - {downloadedStr} / {totalStr}");
+            OnLog(LogLevel.Info, $"{progress.AppName}: {progress.State} - {progress.PercentComplete:F1}% - {speedStr} - {downloadedStr} / {totalStr}");
 
             BroadcastProgress(new PrefillProgressUpdate
             {
-                State = "downloading",
+                State = progress.State,
                 CurrentAppId = progress.AppId,
                 CurrentAppName = progress.AppName,
                 TotalBytes = progress.TotalBytes,

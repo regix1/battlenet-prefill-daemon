@@ -5,6 +5,31 @@
         private readonly HttpClient _client;
         private readonly IAnsiConsole _ansiConsole;
 
+        /// <summary>
+        /// Socket progress sink. Receives the up-front total + a "preparing" state before the transfer
+        /// loop, then throttled live byte progress during the transfer. Defaults to <see cref="NullProgress"/>
+        /// so the upstream Spectre.Console TUI path (CLI usage) is unaffected.
+        /// </summary>
+        private readonly IPrefillProgress _progress;
+
+        /// <summary>Product code reported on every <see cref="DownloadProgressInfo"/> for this run.</summary>
+        private readonly string _progressAppId;
+
+        /// <summary>Display name reported on every <see cref="DownloadProgressInfo"/> for this run.</summary>
+        private readonly string _progressAppName;
+
+        /// <summary>Running total of bytes transferred for the current <see cref="DownloadQueuedRequestsAsync"/> call (Interlocked).</summary>
+        private long _progressBytesDownloaded;
+
+        /// <summary>Ticks of the last throttled progress emit for the current download (Interlocked CAS, mirrors Epic).</summary>
+        private long _lastProgressReportTicks;
+
+        /// <summary>Up-front total bytes for the current download, reported on every progress emit.</summary>
+        private long _progressTotalBytes;
+
+        /// <summary>Throttle window for live byte-progress emits (matches the socket BroadcastThrottle).</summary>
+        private static readonly TimeSpan ProgressThrottle = TimeSpan.FromMilliseconds(250);
+
         private readonly List<string> _cdnList = new List<string>
         {
             "level3.blizzard.com",  // Level3
@@ -60,10 +85,13 @@
 
         #endregion
 
-        public CdnRequestManager(IAnsiConsole ansiConsole)
+        public CdnRequestManager(IAnsiConsole ansiConsole, IPrefillProgress? progress = null, string? progressAppId = null, string? progressAppName = null)
         {
             _ansiConsole = ansiConsole;
             _client = new HttpClient();
+            _progress = progress ?? NullProgress.Instance;
+            _progressAppId = progressAppId ?? string.Empty;
+            _progressAppName = progressAppName ?? string.Empty;
         }
 
         /// <summary>
@@ -101,7 +129,7 @@
         /// false will be returned
         /// </summary>
         /// <returns>True if all downloads succeeded.  False if downloads failed 3 times.</returns>
-        public async Task<bool> DownloadQueuedRequestsAsync(PrefillSummaryResult prefillSummaryResult)
+        public async Task<bool> DownloadQueuedRequestsAsync(PrefillSummaryResult prefillSummaryResult, CancellationToken cancellationToken = default)
         {
             // Combining requests to improve download performance
             List<Request> coalescedRequests = _queuedRequests.CoalesceRequests(true);
@@ -114,6 +142,8 @@
 
             if (AppConfig.SkipDownloads)
             {
+                // Size-only pass (metadata estimate): NEVER emit download progress here — the socket UI must not
+                // see byte progress for the SkipDownloads estimate. Only a real prefill emits to _progress.
                 //TODO not a fan of writing it like this just so that the comparison logic keeps working
                 foreach (var request in coalescedRequests)
                 {
@@ -123,22 +153,62 @@
                 return true;
             }
 
+            var totalDownloadBytes = (long)totalDownloadSize.Bytes;
+
+            // Reset per-download progress accumulators for this run.
+            Interlocked.Exchange(ref _progressBytesDownloaded, 0);
+            Interlocked.Exchange(ref _lastProgressReportTicks, 0);
+            _progressTotalBytes = totalDownloadBytes;
+
+            // Hand the known total to the socket UI up-front (before the first byte) so it immediately shows
+            // "0 B / <total>" instead of N/A / 0 B / 0 B. The "preparing" state is rendered by the frontend.
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                _progress.OnDownloadProgress(new DownloadProgressInfo
+                {
+                    State = "preparing",
+                    AppId = _progressAppId,
+                    AppName = _progressAppName,
+                    TotalBytes = totalDownloadBytes,
+                    BytesDownloaded = 0,
+                    BytesPerSecond = 0,
+                    Elapsed = TimeSpan.Zero
+                });
+            }
+
             var downloadTimer = Stopwatch.StartNew();
             var failedRequests = new ConcurrentBag<Request>();
             await _ansiConsole.CreateSpectreProgress(AppConfig.TransferSpeedUnit).StartAsync(async ctx =>
             {
                 //TODO can probably cleanup this attempt 3 times logic since there is the polly stuff in place now.
                 // Run the initial download
-                failedRequests = await AttemptDownloadAsync(ctx, "Downloading..", coalescedRequests);
+                failedRequests = await AttemptDownloadAsync(ctx, "Downloading..", coalescedRequests, downloadTimer, cancellationToken);
 
                 // Handle any failed requests
                 while (failedRequests.Any() && _retryCount < 3)
                 {
                     _retryCount++;
-                    failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {_retryCount}..", failedRequests.ToList());
-                    await Task.Delay(2000 * _retryCount);
+                    failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {_retryCount}..", failedRequests.ToList(), downloadTimer, cancellationToken);
+                    await Task.Delay(2000 * _retryCount, cancellationToken);
                 }
             });
+
+            // Final 100% report so the UI lands on full completion (only when nothing failed and not cancelled).
+            if (!failedRequests.Any() && !cancellationToken.IsCancellationRequested)
+            {
+                var finalElapsed = downloadTimer.Elapsed;
+                var finalRate = finalElapsed.TotalSeconds > 0 ? totalDownloadBytes / finalElapsed.TotalSeconds : 0;
+                _progress.OnDownloadProgress(new DownloadProgressInfo
+                {
+                    State = "downloading",
+                    AppId = _progressAppId,
+                    AppName = _progressAppName,
+                    TotalBytes = totalDownloadBytes,
+                    BytesDownloaded = totalDownloadBytes,
+                    BytesPerSecond = finalRate,
+                    Elapsed = finalElapsed
+                });
+            }
 
             // Handling final failed requests
             if (failedRequests.Any())
@@ -164,7 +234,7 @@
         /// </summary>
         /// <param name="forceRecache">When specified, will cause the cache to delete the existing cached data for a request, and re-download it again.</param>
         /// <returns>A list of failed requests</returns>
-        private async Task<ConcurrentBag<Request>> AttemptDownloadAsync(ProgressContext ctx, string taskTitle, List<Request> requests, bool forceRecache = false)
+        private async Task<ConcurrentBag<Request>> AttemptDownloadAsync(ProgressContext ctx, string taskTitle, List<Request> requests, Stopwatch downloadTimer, CancellationToken cancellationToken = default, bool forceRecache = false)
         {
             var progressTask = ctx.AddTask(taskTitle, new ProgressTaskSettings { MaxValue = requests.SumTotalBytes().Bytes });
 
@@ -175,17 +245,17 @@
             var byteThreshold = (long)ByteSize.FromMegaBytes(1).Bytes;
 
             var smallRequests = requests.Where(e => e.TotalBytes < byteThreshold).ToList();
-            var smallDownloadTask = Parallel.ForEachAsync(smallRequests, new ParallelOptions { MaxDegreeOfParallelism = 15 }, async (request, _) => await DownloadRequestWrapper(request, _));
+            var smallDownloadTask = Parallel.ForEachAsync(smallRequests, new ParallelOptions { MaxDegreeOfParallelism = 15, CancellationToken = cancellationToken }, async (request, ct) => await DownloadRequestWrapper(request, ct));
 
             var largeRequests = requests.Where(e => e.TotalBytes >= byteThreshold).ToList();
-            var largeDownloadTask = Parallel.ForEachAsync(largeRequests, new ParallelOptions { MaxDegreeOfParallelism = 10 }, async (request, _) => await DownloadRequestWrapper(request, _));
+            var largeDownloadTask = Parallel.ForEachAsync(largeRequests, new ParallelOptions { MaxDegreeOfParallelism = 10, CancellationToken = cancellationToken }, async (request, ct) => await DownloadRequestWrapper(request, ct));
 
             await Task.WhenAll(smallDownloadTask, largeDownloadTask);
 
             // Making sure the progress bar is always set to its max value, some files don't have a size, so the progress bar will appear as unfinished.
             return failedRequests;
 
-            async Task DownloadRequestWrapper(Request request, CancellationToken _)
+            async Task DownloadRequestWrapper(Request request, CancellationToken ct)
             {
                 try
                 {
@@ -197,6 +267,35 @@
                 }
 
                 progressTask.Increment(request.TotalBytes);
+
+                // Emit throttled live byte progress to the socket UI (mirrors epic-prefill DownloadHandler).
+                // Skip emitting once cancellation is requested so we don't race the terminal state.
+                var downloaded = Interlocked.Add(ref _progressBytesDownloaded, request.TotalBytes);
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                var nowTicks = DateTime.UtcNow.Ticks;
+                long prevTicks = Volatile.Read(ref _lastProgressReportTicks);
+                if (prevTicks == 0 || (nowTicks - prevTicks) >= ProgressThrottle.Ticks)
+                {
+                    if (Interlocked.CompareExchange(ref _lastProgressReportTicks, nowTicks, prevTicks) == prevTicks)
+                    {
+                        var elapsed = downloadTimer.Elapsed;
+                        var bytesPerSecond = elapsed.TotalSeconds > 0 ? downloaded / elapsed.TotalSeconds : 0;
+                        _progress.OnDownloadProgress(new DownloadProgressInfo
+                        {
+                            State = "downloading",
+                            AppId = _progressAppId,
+                            AppName = _progressAppName,
+                            TotalBytes = _progressTotalBytes,
+                            BytesDownloaded = downloaded,
+                            BytesPerSecond = bytesPerSecond,
+                            Elapsed = elapsed
+                        });
+                    }
+                }
             };
         }
 
