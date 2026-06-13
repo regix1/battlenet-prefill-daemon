@@ -28,6 +28,34 @@ public sealed class BattleNetPrefillApi : IDisposable
     private bool _isInitialized;
     private bool _isDisposed;
 
+    /// <summary>
+    /// True while <see cref="PrefillAsync"/> is actively running. The download-size estimate in
+    /// <see cref="GetSelectedAppsStatusAsync"/> toggles the process-global <see cref="AppConfig.SkipDownloads"/>
+    /// flag, which a concurrent live prefill reads to decide whether to transfer bytes. We must NEVER run that
+    /// metadata-only pass while a prefill is active, or the running prefill would silently skip all transfers
+    /// yet still write its success markers. Set/cleared via <see cref="Interlocked"/> for cross-thread visibility.
+    /// </summary>
+    private int _isPrefilling;
+
+    /// <summary>
+    /// Serializes the <see cref="AppConfig.SkipDownloads"/>-mutating size pass so two concurrent
+    /// <c>get-selected-apps-status</c> polls cannot clobber each other's save/restore of the global flag.
+    /// </summary>
+    private readonly SemaphoreSlim _sizePassLock = new SemaphoreSlim(1, 1);
+
+    /// <summary>
+    /// Per-product cached download-size estimate, keyed by product code + the CDN/marker version it was
+    /// computed for. Lets repeated status polls return the byte total without re-running the CDN metadata
+    /// round-trip. Invalidated implicitly: a different version produces a different key, so a stale entry is
+    /// simply never read.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, long> _downloadSizeCache = new ConcurrentDictionary<string, long>();
+
+    /// <summary>
+    /// True while a prefill operation is running. Used to suppress the SkipDownloads-mutating size pass.
+    /// </summary>
+    public bool IsPrefilling => Volatile.Read(ref _isPrefilling) != 0;
+
     public BattleNetPrefillApi(IPrefillProgress? progress = null)
     {
         _progress = progress ?? NullProgress.Instance;
@@ -169,8 +197,6 @@ public sealed class BattleNetPrefillApi : IDisposable
             };
         }
 
-        var handler = new TactProductHandler(_console);
-
         var apps = new List<AppStatus>();
         long totalDownloadSize = 0;
 
@@ -185,14 +211,7 @@ public sealed class BattleNetPrefillApi : IDisposable
             // Only run the (network-touching) size pass for products that still need downloading.
             if (product != null && !isUpToDate)
             {
-                try
-                {
-                    downloadSize = await handler.GetProductDownloadSizeAsync(product);
-                }
-                catch (Exception ex)
-                {
-                    _progress.OnLog(LogLevel.Warning, $"Failed to get size for {product.DisplayName}: {ex.Message}");
-                }
+                downloadSize = await GetCachedDownloadSizeAsync(product, cancellationToken);
             }
 
             totalDownloadSize += downloadSize;
@@ -213,6 +232,77 @@ public sealed class BattleNetPrefillApi : IDisposable
     }
 
     /// <summary>
+    /// Returns the per-product download-size estimate, using a version-keyed cache to avoid repeated CDN
+    /// round-trips and to shrink the race window around the global <see cref="AppConfig.SkipDownloads"/> flag.
+    ///
+    /// SAFETY: the actual size pass mutates <see cref="AppConfig.SkipDownloads"/> (a process-global static)
+    /// to suppress byte transfers. A concurrent live prefill reads that same flag, so we MUST NOT run the pass
+    /// while <see cref="IsPrefilling"/> is true — doing so would make the running prefill skip every transfer
+    /// yet still report success. When a prefill is active we return the cached value if we have one, else 0;
+    /// we never block the poll and never corrupt the running prefill. The pass itself is serialized behind
+    /// <see cref="_sizePassLock"/> so two concurrent polls cannot clobber the flag's save/restore.
+    /// </summary>
+    private async Task<long> GetCachedDownloadSizeAsync(TactProduct product, CancellationToken cancellationToken)
+    {
+        var cacheKey = BuildSizeCacheKey(product.ProductCode);
+        if (_downloadSizeCache.TryGetValue(cacheKey, out var cachedSize))
+        {
+            return cachedSize;
+        }
+
+        // A prefill is running: never touch AppConfig.SkipDownloads. Return cached value if any, else 0.
+        if (IsPrefilling)
+        {
+            _progress.OnLog(LogLevel.Info, $"Prefill in progress - skipping size estimate for {product.DisplayName}");
+            return 0;
+        }
+
+        await _sizePassLock.WaitAsync(cancellationToken);
+        try
+        {
+            // Re-check after acquiring: another poll may have computed it, or a prefill may have started
+            // while we were waiting on the semaphore.
+            if (_downloadSizeCache.TryGetValue(cacheKey, out cachedSize))
+            {
+                return cachedSize;
+            }
+            if (IsPrefilling)
+            {
+                _progress.OnLog(LogLevel.Info, $"Prefill started - skipping size estimate for {product.DisplayName}");
+                return 0;
+            }
+
+            try
+            {
+                var handler = new TactProductHandler(_console);
+                var downloadSize = await handler.GetProductDownloadSizeAsync(product);
+                _downloadSizeCache[cacheKey] = downloadSize;
+                return downloadSize;
+            }
+            catch (Exception ex)
+            {
+                _progress.OnLog(LogLevel.Warning, $"Failed to get size for {product.DisplayName}: {ex.Message}");
+                return 0;
+            }
+        }
+        finally
+        {
+            _sizePassLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Builds the size-cache key from the product code and its current prefill-marker version. When a prefill
+    /// updates the product, the marker version changes, so the next poll computes a fresh key and the stale
+    /// entry is naturally never read again.
+    /// </summary>
+    private static string BuildSizeCacheKey(string productCode)
+    {
+        var version = ReadPrefillMarker(productCode) ?? "none";
+        return $"{productCode}@{version}";
+    }
+
+    /// <summary>
     /// Runs the prefill operation, emitting structured progress events per product.
     /// </summary>
     public async Task<PrefillResult> PrefillAsync(
@@ -223,6 +313,12 @@ public sealed class BattleNetPrefillApi : IDisposable
         ThrowIfDisposed();
 
         options ??= new PrefillOptions();
+
+        // Mark prefill active BEFORE any work so the SkipDownloads-mutating size pass in
+        // GetSelectedAppsStatusAsync bails out for the entire duration of this prefill.
+        Interlocked.Exchange(ref _isPrefilling, 1);
+        try
+        {
 
         _progress.OnOperationStarted("Prefill operation");
         var timer = Stopwatch.StartNew();
@@ -347,6 +443,15 @@ public sealed class BattleNetPrefillApi : IDisposable
                 TotalTime = timer.Elapsed
             };
         }
+
+        }
+        finally
+        {
+            // A prefill may have updated product versions; drop cached size estimates so the next status
+            // poll recomputes against the new markers. Then clear the active flag so size passes resume.
+            _downloadSizeCache.Clear();
+            Interlocked.Exchange(ref _isPrefilling, 0);
+        }
     }
 
     private static TactProduct? ResolveProduct(string appId)
@@ -437,6 +542,7 @@ public sealed class BattleNetPrefillApi : IDisposable
         if (_isDisposed) return;
 
         Shutdown();
+        _sizePassLock.Dispose();
         _isDisposed = true;
     }
 
