@@ -1,0 +1,15 @@
+bin
+obj
+/publish
+.vs
+*.ak
+lockfile
+/BattleNetPrefill/BattleNetPrefill.csproj.user
+/BattleNetPrefill.sln.DotSettings.user
+/docs/site
+*.log
+*.user
+BattleNetPrefill/Properties/PublishProfiles/FolderProfile.pubxml
+/Benchmarks/BenchmarkDotNet.Artifacts/results
+/docs/RenderAnsiToSvg/__pycache__/*.pyc
+.serena/project.yml

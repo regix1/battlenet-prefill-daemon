@@ -1,0 +1,28 @@
+{
+  "profiles": {
+    "Prefill Test Products - No Download": {
+      "commandName": "Project",
+      "commandLineArgs": "prefill -p s1 s2 pro wow wow_classic wow_classic_era --verbose"
+    },
+    "Prefill All - No Download - No Cache": {
+      "commandName": "Project",
+      "commandLineArgs": "prefill --all --no-download --nocache --force"
+    },
+    "Prefill WOW - Compare Requests": {
+      "commandName": "Project",
+      "commandLineArgs": "prefill -p pro --compare-requests --no-download --force"
+    },
+    "Select Apps": {
+      "commandName": "Project",
+      "commandLineArgs": "select-apps"
+    },
+    "Prefill Selected - No download": {
+      "commandName": "Project",
+      "commandLineArgs": "prefill --no-download --force"
+    },
+    "Clear Cache - Accept": {
+      "commandName": "Project",
+      "commandLineArgs": "clear-cache -y"
+    }
+  }
+}

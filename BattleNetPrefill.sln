@@ -1,0 +1,31 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.2.32516.85
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "BattleNetPrefill", "BattleNetPrefill\BattleNetPrefill.csproj", "{7A7ADAC8-F8D4-4557-949F-67BCF6F3057D}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "LancachePrefill.Common", "LancachePrefill.Common\dotnet\LancachePrefill.Common.csproj", "{42A39A83-50EC-4F02-B14C-77C3EF860DD9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{7A7ADAC8-F8D4-4557-949F-67BCF6F3057D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7A7ADAC8-F8D4-4557-949F-67BCF6F3057D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7A7ADAC8-F8D4-4557-949F-67BCF6F3057D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7A7ADAC8-F8D4-4557-949F-67BCF6F3057D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{42A39A83-50EC-4F02-B14C-77C3EF860DD9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{42A39A83-50EC-4F02-B14C-77C3EF860DD9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{42A39A83-50EC-4F02-B14C-77C3EF860DD9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{42A39A83-50EC-4F02-B14C-77C3EF860DD9}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {13DEC178-59CD-4396-B1A1-7FB89D08D0F4}
+	EndGlobalSection
+EndGlobal
