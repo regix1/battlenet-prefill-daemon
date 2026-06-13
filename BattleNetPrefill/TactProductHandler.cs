@@ -13,6 +13,37 @@
             _forcePrefill = forcePrefill;
         }
 
+        /// <summary>
+        /// The accumulated prefill summary for this handler instance, including the real
+        /// <see cref="PrefillSummaryResult.TotalBytesTransferred"/> summed across every processed product.
+        /// </summary>
+        public PrefillSummaryResult Summary => _prefillSummaryResult;
+
+        /// <summary>
+        /// Computes the download size (in bytes) for a single product without transferring any data.
+        /// Runs the exact same metadata pass as <see cref="ProcessProductAsync"/> with
+        /// <see cref="AppConfig.SkipDownloads"/> forced on, so the full byte-range queue is built and
+        /// coalesced (and summed into <see cref="PrefillSummaryResult.TotalBytesTransferred"/>) but no
+        /// bytes are downloaded. Returns the remaining-to-download size for the product; an up-to-date
+        /// product reports 0. <see cref="AppConfig.SkipDownloads"/> is always restored.
+        /// </summary>
+        public async Task<long> GetProductDownloadSizeAsync(TactProduct product)
+        {
+            var previousSkipDownloads = AppConfig.SkipDownloads;
+            var bytesBefore = _prefillSummaryResult.TotalBytesTransferred;
+            AppConfig.SkipDownloads = true;
+            try
+            {
+                await ProcessProductAsync(product);
+                var delta = _prefillSummaryResult.TotalBytesTransferred - bytesBefore;
+                return (long)delta.Bytes;
+            }
+            finally
+            {
+                AppConfig.SkipDownloads = previousSkipDownloads;
+            }
+        }
+
         public async Task ProcessMultipleProductsAsync(List<TactProduct> productsToProcess)
         {
             var timer = Stopwatch.StartNew();

@@ -153,7 +153,7 @@ public sealed class BattleNetPrefillApi : IDisposable
     /// <summary>
     /// Status of the currently selected apps, including whether each has been prefilled before.
     /// </summary>
-    public Task<SelectedAppsStatus> GetSelectedAppsStatusAsync(CancellationToken cancellationToken = default)
+    public async Task<SelectedAppsStatus> GetSelectedAppsStatusAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfNotInitialized();
         ThrowIfDisposed();
@@ -161,31 +161,55 @@ public sealed class BattleNetPrefillApi : IDisposable
         var selectedAppIds = GetSelectedApps();
         if (selectedAppIds.Count == 0)
         {
-            return Task.FromResult(new SelectedAppsStatus
+            return new SelectedAppsStatus
             {
                 Apps = new List<AppStatus>(),
                 TotalDownloadSize = 0,
                 Message = "No apps selected"
-            });
+            };
         }
 
-        var apps = selectedAppIds.Select(appId =>
+        var handler = new TactProductHandler(_console);
+
+        var apps = new List<AppStatus>();
+        long totalDownloadSize = 0;
+
+        foreach (var appId in selectedAppIds)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             var product = ResolveProduct(appId);
-            return new AppStatus
+            var isUpToDate = HasPrefillMarker(appId);
+            long downloadSize = 0;
+
+            // Only run the (network-touching) size pass for products that still need downloading.
+            if (product != null && !isUpToDate)
+            {
+                try
+                {
+                    downloadSize = await handler.GetProductDownloadSizeAsync(product);
+                }
+                catch (Exception ex)
+                {
+                    _progress.OnLog(LogLevel.Warning, $"Failed to get size for {product.DisplayName}: {ex.Message}");
+                }
+            }
+
+            totalDownloadSize += downloadSize;
+            apps.Add(new AppStatus
             {
                 AppId = appId,
                 Name = product?.DisplayName ?? appId,
-                DownloadSize = 0,
-                IsUpToDate = HasPrefillMarker(appId)
-            };
-        }).ToList();
+                DownloadSize = downloadSize,
+                IsUpToDate = isUpToDate
+            });
+        }
 
-        return Task.FromResult(new SelectedAppsStatus
+        return new SelectedAppsStatus
         {
             Apps = apps,
-            TotalDownloadSize = 0
-        });
+            TotalDownloadSize = totalDownloadSize
+        };
     }
 
     /// <summary>
@@ -290,7 +314,7 @@ public sealed class BattleNetPrefillApi : IDisposable
                 UpdatedApps = updated,
                 AlreadyUpToDate = alreadyUpToDate,
                 FailedApps = failed,
-                TotalBytesTransferred = 0,
+                TotalBytesTransferred = (long)handler.Summary.TotalBytesTransferred.Bytes,
                 TotalTime = timer.Elapsed
             });
 
