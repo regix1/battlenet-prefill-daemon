@@ -14,24 +14,24 @@
 
         public static readonly TactProduct BlizzardArcadeCollection = new TactProduct("rtro") { DisplayName = "Blizzard Arcade Collection", DefaultTags = new[] { "dummy" }, IsBlizzard = true };
 
-        public static readonly TactProduct DiabloImmortal = new TactProduct("anbs") { DisplayName = "Diablo: Immortal", DefaultTags = new[] { "dummy" }, IsBlizzard = true };
-        public static readonly TactProduct Diablo2Resurrected = new TactProduct("osi") { DisplayName = "Diablo 2: Resurrected", IsBlizzard = true };
-        public static readonly TactProduct Diablo3 = new TactProduct("d3") { DisplayName = "Diablo 3", IsBlizzard = true };
-        public static readonly TactProduct Diablo4 = new TactProduct("fenris") { DisplayName = "Diablo 4", IsBlizzard = true };
+        public static readonly TactProduct DiabloImmortal = new TactProduct("anbs") { DisplayName = "Diablo Immortal", DefaultTags = new[] { "dummy" }, IsBlizzard = true };
+        public static readonly TactProduct Diablo2Resurrected = new TactProduct("osi") { DisplayName = "Diablo II: Resurrected", IsBlizzard = true };
+        public static readonly TactProduct Diablo3 = new TactProduct("d3") { DisplayName = "Diablo III", IsBlizzard = true };
+        public static readonly TactProduct Diablo4 = new TactProduct("fenris") { DisplayName = "Diablo IV", IsBlizzard = true };
 
         public static readonly TactProduct Hearthstone = new TactProduct("hsb") { DisplayName = "Hearthstone", DefaultTags = new[] { "Windows", "enUS" }, IsBlizzard = true };
         public static readonly TactProduct HeroesOfTheStorm = new TactProduct("hero") { DisplayName = "Heroes of the Storm", IsBlizzard = true };
 
         public static readonly TactProduct Starcraft1 = new TactProduct("s1")
         {
-            DisplayName = "Starcraft Remastered",
+            DisplayName = "StarCraft: Remastered",
             DefaultTags = new[] { "Windows", "enUS", "x86", "noigr" },
             IsBlizzard = true
         };
 
         public static readonly TactProduct Starcraft2 = new TactProduct("s2")
         {
-            DisplayName = "Starcraft 2",
+            DisplayName = "StarCraft II",
             DefaultTags = new[] { "Windows", "enUS" },
             IsBlizzard = true
         };
@@ -44,12 +44,12 @@
         };
 
 
-        public static readonly TactProduct Warcraft1Remastered = new TactProduct("w1r") { DisplayName = "Warcraft 1: Remastered", IsBlizzard = true };
-        public static readonly TactProduct Warcraft2Remastered = new TactProduct("w2r") { DisplayName = "WarCraft II: Remastered", IsBlizzard = true };
-        public static readonly TactProduct Warcraft3Reforged = new TactProduct("w3") { DisplayName = "Warcraft 3: Reforged", IsBlizzard = true };
+        public static readonly TactProduct Warcraft1Remastered = new TactProduct("w1r") { DisplayName = "Warcraft I: Remastered", IsBlizzard = true };
+        public static readonly TactProduct Warcraft2Remastered = new TactProduct("w2r") { DisplayName = "Warcraft II: Remastered", IsBlizzard = true };
+        public static readonly TactProduct Warcraft3Reforged = new TactProduct("w3") { DisplayName = "Warcraft III: Reforged", IsBlizzard = true };
         public static readonly TactProduct WorldOfWarcraft = new TactProduct("wow")
         {
-            DisplayName = "World Of Warcraft",
+            DisplayName = "World of Warcraft",
             DefaultTags = new[] { "Windows", "enUS", "x86" },
             IsBlizzard = true
         };
@@ -78,15 +78,15 @@
             DefaultTags = new[] { "enUS", "acct-DEU", "cp", "mp", "zm", "zm2" },
             IsActivision = true
         };
-        public static readonly TactProduct CodModernWarfare = new TactProduct("odin") { DisplayName = "Call of Duty: Modern Warfare 2019", IsActivision = true };
+        public static readonly TactProduct CodModernWarfare = new TactProduct("odin") { DisplayName = "Call of Duty: Modern Warfare (2019)", IsActivision = true };
 
         public static readonly TactProduct CallOfDuty = new TactProduct("auks") { DisplayName = "Call of Duty", IsActivision = true };
-        public static readonly TactProduct CodMW2Remastered = new TactProduct("lazr") { DisplayName = "Call of Duty: MW2 Remastered", IsActivision = true };
+        public static readonly TactProduct CodMW2Remastered = new TactProduct("lazr") { DisplayName = "Call of Duty: Modern Warfare 2 Remastered", IsActivision = true };
         public static readonly TactProduct CodVanguard = new TactProduct("fore") { DisplayName = "Call of Duty: Vanguard", IsActivision = true };
 
         public static readonly TactProduct CrashBandicoot4 = new TactProduct("wlby")
         {
-            DisplayName = "Crash Bandicoot 4: It's About Time",
+            DisplayName = "Crash Bandicoot 4",
             DefaultTags = new[] { "dummy" },
             IsActivision = true
         };
