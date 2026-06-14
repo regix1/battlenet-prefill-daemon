@@ -78,7 +78,7 @@ Progress events use a `state` machine: `downloading` → `app_completed` / `alre
 
 ## Supported products
 
-The TACT catalog the upstream tool knows how to prefill — Blizzard (Diablo, Hearthstone, Overwatch 2, StarCraft,
+The TACT catalog the upstream tool knows how to prefill — Blizzard (Diablo, Hearthstone, Overwatch, StarCraft,
 Warcraft, WoW, …), Activision (Call of Duty titles, Crash Bandicoot 4), and Microsoft (Avowed, Sea of Thieves).
 See [`BattleNetPrefill/TactProduct.cs`](BattleNetPrefill/TactProduct.cs) for the full list.
 
