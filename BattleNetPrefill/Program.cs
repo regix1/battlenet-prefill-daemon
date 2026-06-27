@@ -42,6 +42,8 @@ namespace BattleNetPrefill
                     cts.Cancel();
                 };
 
+                using var maxLifetimeTimer = StartMaxLifetimeTimer(cts);
+
                 if (useTcp)
                 {
                     await DaemonMode.RunTcpAsync(tcpPort, cts.Token);
@@ -66,6 +68,27 @@ namespace BattleNetPrefill
                 }
                 return 1;
             }
+        }
+
+        private static System.Threading.Timer? StartMaxLifetimeTimer(CancellationTokenSource cts)
+        {
+            var maxLifetimeEnv = Environment.GetEnvironmentVariable("PREFILL_MAX_LIFETIME_SECONDS");
+            if (!int.TryParse(maxLifetimeEnv, out var maxLifetimeSeconds) || maxLifetimeSeconds <= 0)
+            {
+                return null;
+            }
+
+            Console.WriteLine($"Max lifetime set to {maxLifetimeSeconds} seconds. Daemon will self-shutdown after this period.");
+
+            return new System.Threading.Timer(
+                _ =>
+                {
+                    Console.WriteLine($"\nMax lifetime of {maxLifetimeSeconds} seconds reached. Shutting down daemon...");
+                    cts.Cancel();
+                },
+                state: null,
+                dueTime: TimeSpan.FromSeconds(maxLifetimeSeconds),
+                period: Timeout.InfiniteTimeSpan);
         }
 
         private static void ParseHiddenFlags()
