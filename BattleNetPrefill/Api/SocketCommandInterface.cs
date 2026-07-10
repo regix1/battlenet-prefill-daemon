@@ -172,11 +172,17 @@ public sealed class SocketCommandInterface : IDisposable
         }
 
         var appIds = JsonSerializer.Deserialize(appIdsJson, DaemonSerializationContext.Default.ListString);
-        if (appIds != null && appIds.Count > 0)
+        if (appIds == null)
         {
-            _api.SetSelectedApps(appIds);
-            _progress.OnLog(LogLevel.Info, $"Set {appIds.Count} selected apps");
+            return new CommandResponse
+            {
+                Id = request.Id, Success = false, Error = "appIds must be a JSON array", CompletedAt = DateTime.UtcNow
+            };
         }
+
+        // An empty array is a valid request: it clears the current selection.
+        _api.SetSelectedApps(appIds);
+        _progress.OnLog(LogLevel.Info, $"Set {appIds.Count} selected apps");
 
         return new CommandResponse
         {
