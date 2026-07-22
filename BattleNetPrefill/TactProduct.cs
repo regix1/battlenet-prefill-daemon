@@ -14,6 +14,7 @@
 
         public static readonly TactProduct BlizzardArcadeCollection = new TactProduct("rtro") { DisplayName = "Blizzard Arcade Collection", DefaultTags = new[] { "dummy" }, IsBlizzard = true };
 
+        public static readonly TactProduct Diablo1 = new TactProduct("drtl") { DisplayName = "Diablo", DefaultTags = new[] { "dummy" }, IsBlizzard = true };
         public static readonly TactProduct DiabloImmortal = new TactProduct("anbs") { DisplayName = "Diablo Immortal", DefaultTags = new[] { "dummy" }, IsBlizzard = true };
         public static readonly TactProduct Diablo2Resurrected = new TactProduct("osi") { DisplayName = "Diablo II: Resurrected", IsBlizzard = true };
         public static readonly TactProduct Diablo3 = new TactProduct("d3") { DisplayName = "Diablo III", IsBlizzard = true };
@@ -45,8 +46,10 @@
 
 
         public static readonly TactProduct Warcraft1Remastered = new TactProduct("w1r") { DisplayName = "Warcraft I: Remastered", IsBlizzard = true };
+        public static readonly TactProduct Warcraft2BattlenetEdition = new TactProduct("w2bn") { DisplayName = "Warcraft II: Battle.net Edition", DefaultTags = new[] { "dummy" }, IsBlizzard = true };
         public static readonly TactProduct Warcraft2Remastered = new TactProduct("w2r") { DisplayName = "Warcraft II: Remastered", IsBlizzard = true };
         public static readonly TactProduct Warcraft3Reforged = new TactProduct("w3") { DisplayName = "Warcraft III: Reforged", IsBlizzard = true };
+        public static readonly TactProduct WarcraftRumble = new TactProduct("gryphon") { DisplayName = "Warcraft Rumble", IsBlizzard = true };
         public static readonly TactProduct WorldOfWarcraft = new TactProduct("wow")
         {
             DisplayName = "World of Warcraft",
@@ -72,6 +75,7 @@
         #region Activision
 
         public static readonly TactProduct CodBO4 = new TactProduct("viper") { DisplayName = "Call of Duty: Black Ops 4", IsActivision = true };
+        public static readonly TactProduct CodBO6 = new TactProduct("btlr") { DisplayName = "Call of Duty: Black Ops 6", IsActivision = true };
         public static readonly TactProduct CodBOCW = new TactProduct("zeus")
         {
             DisplayName = "Call of Duty: Black Ops Cold War",
@@ -79,6 +83,8 @@
             IsActivision = true
         };
         public static readonly TactProduct CodModernWarfare = new TactProduct("odin") { DisplayName = "Call of Duty: Modern Warfare (2019)", IsActivision = true };
+        public static readonly TactProduct CodModernWarfare2 = new TactProduct("nina") { DisplayName = "Call of Duty: Modern Warfare II", IsActivision = true };
+        public static readonly TactProduct CodModernWarfare3 = new TactProduct("pinta") { DisplayName = "Call of Duty: Modern Warfare III", IsActivision = true };
 
         public static readonly TactProduct CallOfDuty = new TactProduct("auks") { DisplayName = "Call of Duty", IsActivision = true };
         public static readonly TactProduct CodMW2Remastered = new TactProduct("lazr") { DisplayName = "Call of Duty: Modern Warfare 2 Remastered", IsActivision = true };
