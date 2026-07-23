@@ -2,9 +2,17 @@
 {
     public static class IndexParser
     {
-        public static async Task<Dictionary<MD5Hash, IndexEntry>> ParseIndexAsync(CdnRequestManager cdnRequestManager, RootFolder folder, MD5Hash hashId)
+        public static async Task<Dictionary<MD5Hash, IndexEntry>> ParseIndexAsync(
+            CdnRequestManager cdnRequestManager,
+            RootFolder folder,
+            MD5Hash hashId,
+            CancellationToken cancellationToken = default)
         {
-            byte[] indexContent = await cdnRequestManager.GetRequestAsBytesAsync(folder, hashId, isIndex: true);
+            byte[] indexContent = await cdnRequestManager.GetRequestAsBytesAsync(
+                folder,
+                hashId,
+                isIndex: true,
+                cancellationToken: cancellationToken);
 
             var indexDict = new Dictionary<MD5Hash, IndexEntry>();
 

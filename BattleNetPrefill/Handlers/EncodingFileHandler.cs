@@ -12,7 +12,9 @@
             _cdnRequestManager = cdnRequestManager;
         }
 
-        public async Task<EncodingFile> GetEncodingAsync(BuildConfigFile buildConfig)
+        public async Task<EncodingFile> GetEncodingAsync(
+            BuildConfigFile buildConfig,
+            CancellationToken cancellationToken = default)
         {
             int encodingSize;
             if (buildConfig.encodingSize == null || buildConfig.encodingSize.Length < 2)
@@ -26,11 +28,17 @@
 
             var encoding = new EncodingFile();
 
-            byte[] content = await _cdnRequestManager.GetRequestAsBytesAsync(RootFolder.data, buildConfig.encoding[1]);
+            byte[] content = await _cdnRequestManager.GetRequestAsBytesAsync(
+                RootFolder.data,
+                buildConfig.encoding[1],
+                cancellationToken: cancellationToken);
 
             if (encodingSize != 0 && encodingSize != content.Length)
             {
-                content = await _cdnRequestManager.GetRequestAsBytesAsync(RootFolder.data, buildConfig.encoding[1]);
+                content = await _cdnRequestManager.GetRequestAsBytesAsync(
+                    RootFolder.data,
+                    buildConfig.encoding[1],
+                    cancellationToken: cancellationToken);
 
                 if (encodingSize != content.Length && encodingSize != 0)
                 {

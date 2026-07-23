@@ -23,11 +23,16 @@
         /// Downloads the "DownloadFile", and parses the raw data into a useable format.
         /// Must be called prior to using <see cref="HandleDownloadFileAsync"/>
         /// </summary>
-        public async Task ParseDownloadFileAsync(BuildConfigFile buildConfig)
+        public async Task ParseDownloadFileAsync(
+            BuildConfigFile buildConfig,
+            CancellationToken cancellationToken = default)
         {
             _downloadFile = new DownloadFile();
 
-            var content = await _cdnRequestManager.GetRequestAsBytesAsync(RootFolder.data, buildConfig.download[1]);
+            var content = await _cdnRequestManager.GetRequestAsBytesAsync(
+                RootFolder.data,
+                buildConfig.download[1],
+                cancellationToken: cancellationToken);
 
             using var memoryStream = BLTE.Parse(content);
             using BinaryReader bin = new BinaryReader(memoryStream);
@@ -103,9 +108,17 @@
         /// <summary>
         /// Determines which files need to be downloaded, and queues them for download.
         /// </summary>
-        public async Task HandleDownloadFileAsync(ArchiveIndexHandler archiveIndexHandler, CDNConfigFile cdnConfigFile, TactProduct targetProduct)
+        public async Task HandleDownloadFileAsync(
+            ArchiveIndexHandler archiveIndexHandler,
+            CDNConfigFile cdnConfigFile,
+            TactProduct targetProduct,
+            CancellationToken cancellationToken = default)
         {
-            Dictionary<MD5Hash, IndexEntry> unarchivedFileIndex = await IndexParser.ParseIndexAsync(_cdnRequestManager, RootFolder.data, cdnConfigFile.fileIndex);
+            Dictionary<MD5Hash, IndexEntry> unarchivedFileIndex = await IndexParser.ParseIndexAsync(
+                _cdnRequestManager,
+                RootFolder.data,
+                cdnConfigFile.fileIndex,
+                cancellationToken);
 
             var tagsToUse = DetermineTagsToUse(targetProduct);
 

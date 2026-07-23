@@ -9,11 +9,16 @@
             _cdnRequestManager = cdnRequestManager;
         }
 
-        public async Task<CDNConfigFile> GetCdnConfigAsync(VersionsEntry targetVersion)
+        public async Task<CDNConfigFile> GetCdnConfigAsync(
+            VersionsEntry targetVersion,
+            CancellationToken cancellationToken = default)
         {
             var cdnConfig = new CDNConfigFile();
 
-            var content = Encoding.UTF8.GetString(await _cdnRequestManager.GetRequestAsBytesAsync(RootFolder.config, targetVersion.cdnConfig));
+            var content = Encoding.UTF8.GetString(await _cdnRequestManager.GetRequestAsBytesAsync(
+                RootFolder.config,
+                targetVersion.cdnConfig,
+                cancellationToken: cancellationToken));
             var cdnConfigLines = content.Split("\n", StringSplitOptions.RemoveEmptyEntries);
 
             foreach (var i in cdnConfigLines)
@@ -72,9 +77,14 @@
             return cdnConfig;
         }
 
-        public async Task<VersionsEntry> GetLatestVersionEntryAsync(TactProduct tactProduct)
+        public async Task<VersionsEntry> GetLatestVersionEntryAsync(
+            TactProduct tactProduct,
+            CancellationToken cancellationToken = default)
         {
-            string content = await _cdnRequestManager.MakePatchRequestAsync(tactProduct, PatchRequest.versions);
+            string content = await _cdnRequestManager.MakePatchRequestAsync(
+                tactProduct,
+                PatchRequest.versions,
+                cancellationToken);
 
             var lines = content.Replace("\0", "")
                                .Split("\n", StringSplitOptions.RemoveEmptyEntries)

@@ -275,9 +275,13 @@ public sealed class BattleNetPrefillApi : IDisposable
             try
             {
                 var handler = new TactProductHandler(_console);
-                var downloadSize = await handler.GetProductDownloadSizeAsync(product);
+                var downloadSize = await handler.GetProductDownloadSizeAsync(product, cancellationToken);
                 _downloadSizeCache[cacheKey] = downloadSize;
                 return downloadSize;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -438,15 +442,10 @@ public sealed class BattleNetPrefillApi : IDisposable
                 TotalTime = timer.Elapsed
             };
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             _progress.OnLog(LogLevel.Info, "Prefill operation cancelled");
-            return new PrefillResult
-            {
-                Success = false,
-                ErrorMessage = "Prefill cancelled",
-                TotalTime = timer.Elapsed
-            };
+            throw;
         }
         catch (Exception ex)
         {

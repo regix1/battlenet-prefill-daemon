@@ -18,9 +18,9 @@ public sealed class SocketCommandInterface : IDisposable
     private readonly SocketServer _socketServer;
     private readonly SocketProgress _progress;
     private readonly CancellationTokenSource _cts = new();
-    private CancellationTokenSource? _prefillCts;
+    private readonly OwnedOperationCoordinator _prefillOperation = new();
     private readonly BattleNetPrefillApi _api;
-    private bool _isPrefilling;
+    private readonly Func<PrefillOptions, CancellationToken, Task<PrefillResult>> _prefillAsync;
     private bool _disposed;
 
     public SocketCommandInterface(string socketPath)
@@ -28,6 +28,7 @@ public sealed class SocketCommandInterface : IDisposable
         _progress = new SocketProgress();
         _socketServer = new SocketServer(socketPath, _progress);
         _api = new BattleNetPrefillApi(_progress);
+        _prefillAsync = _api.PrefillAsync;
         _socketServer.OnCommand = HandleCommandAsync;
 
         _progress.SocketServer = _socketServer;
@@ -38,10 +39,21 @@ public sealed class SocketCommandInterface : IDisposable
         _progress = new SocketProgress();
         _socketServer = new SocketServer(tcpPort, _progress);
         _api = new BattleNetPrefillApi(_progress);
+        _prefillAsync = _api.PrefillAsync;
         _socketServer.OnCommand = HandleCommandAsync;
 
         _progress.SocketServer = _socketServer;
     }
+
+    internal SocketCommandInterface(
+        int tcpPort,
+        Func<PrefillOptions, CancellationToken, Task<PrefillResult>> prefillAsync)
+        : this(tcpPort)
+    {
+        _prefillAsync = prefillAsync ?? throw new ArgumentNullException(nameof(prefillAsync));
+    }
+
+    internal int BoundTcpPort => _socketServer.BoundTcpPort;
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -59,6 +71,7 @@ public sealed class SocketCommandInterface : IDisposable
     public async Task StopAsync()
     {
         _cts.Cancel();
+        await _prefillOperation.CancelAndWaitAsync();
         await _socketServer.StopAsync();
         _progress.OnLog(LogLevel.Info, "Socket command interface stopped");
     }
@@ -71,13 +84,13 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return request.Type.ToLowerInvariant() switch
             {
-                "cancel-prefill" => HandleCancelPrefill(request),
+                "cancel-prefill" => await HandleCancelPrefillAsync(request, cancellationToken),
                 "status" => HandleStatus(request),
                 "get-owned-games" => await HandleGetOwnedGamesAsync(request, cancellationToken),
                 "get-selected-apps" => HandleGetSelectedApps(request),
                 "set-selected-apps" => HandleSetSelectedApps(request),
                 "get-selected-apps-status" => await HandleGetSelectedAppsStatusAsync(request, cancellationToken),
-                "prefill" => HandlePrefill(request),
+                "prefill" => await HandlePrefillAsync(request, cancellationToken),
                 "clear-cache" => HandleClearCache(request),
                 "get-cache-info" => HandleGetCacheInfo(request),
                 "check-cache-status" => await HandleCheckCacheStatusAsync(request, cancellationToken),
@@ -90,6 +103,10 @@ public sealed class SocketCommandInterface : IDisposable
                     CompletedAt = DateTime.UtcNow
                 }
             };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -104,9 +121,11 @@ public sealed class SocketCommandInterface : IDisposable
         }
     }
 
-    private CommandResponse HandleCancelPrefill(CommandRequest request)
+    private async Task<CommandResponse> HandleCancelPrefillAsync(
+        CommandRequest request,
+        CancellationToken cancellationToken)
     {
-        if (!_isPrefilling)
+        if (!_prefillOperation.IsRunning)
         {
             return new CommandResponse
             {
@@ -115,12 +134,35 @@ public sealed class SocketCommandInterface : IDisposable
         }
 
         _progress.OnLog(LogLevel.Info, "Cancelling prefill...");
-        try { _prefillCts?.Cancel(); }
-        catch (Exception ex) { _progress.OnLog(LogLevel.Debug, $"Error cancelling prefill CTS: {ex.Message}"); }
+        var result = await _prefillOperation.CancelAndWaitAsync(cancellationToken);
+        if (result.Status == OwnedOperationStatus.Failed)
+        {
+            return new CommandResponse
+            {
+                Id = request.Id,
+                Success = false,
+                Error = result.Exception?.Message ?? "Prefill failed while cancellation was in progress",
+                CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        if (_prefillOperation.IsRunning || _api.IsPrefilling)
+        {
+            return new CommandResponse
+            {
+                Id = request.Id,
+                Success = false,
+                Error = "Prefill did not stop cleanly",
+                CompletedAt = DateTime.UtcNow
+            };
+        }
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Prefill cancellation requested", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = result.Status == OwnedOperationStatus.Idle ? "No prefill in progress" : "Prefill cancelled",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -204,9 +246,11 @@ public sealed class SocketCommandInterface : IDisposable
         };
     }
 
-    private CommandResponse HandlePrefill(CommandRequest request)
+    private async Task<CommandResponse> HandlePrefillAsync(
+        CommandRequest request,
+        CancellationToken cancellationToken)
     {
-        if (_isPrefilling)
+        if (_prefillOperation.IsRunning || _api.IsPrefilling)
         {
             return new CommandResponse
             {
@@ -230,43 +274,41 @@ public sealed class SocketCommandInterface : IDisposable
             }
         }
 
-        _prefillCts?.Dispose();
-        _prefillCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-        _isPrefilling = true;
-
-        _ = Task.Run(async () =>
+        cancellationToken.ThrowIfCancellationRequested();
+        try
         {
-            try
+            await _prefillOperation.StartAsync(async operationToken =>
             {
-                var result = await _api.PrefillAsync(options, _prefillCts.Token);
+                try
+                {
+                    var result = await _prefillAsync(options, operationToken);
 
-                if (result.Success)
-                    _progress.OnLog(LogLevel.Info, "Prefill completed successfully");
-                else
-                    _progress.OnLog(LogLevel.Warning, $"Prefill completed with errors: {result.ErrorMessage}");
-            }
-            catch (OperationCanceledException)
+                    if (result.Success)
+                        _progress.OnLog(LogLevel.Info, "Prefill completed successfully");
+                    else
+                        _progress.OnLog(LogLevel.Warning, $"Prefill completed with errors: {result.ErrorMessage}");
+                }
+                catch (OperationCanceledException) when (operationToken.IsCancellationRequested)
+                {
+                    _progress.OnPrefillCancelled("Prefill cancelled by user");
+                }
+                catch (Exception ex)
+                {
+                    _progress.OnError($"Prefill failed: {ex.Message}", ex);
+                    throw;
+                }
+            }, _cts.Token);
+        }
+        catch (InvalidOperationException)
+        {
+            return new CommandResponse
             {
-                // Emit a terminal progress event so the backend clears its IsPrefilling flag.
-                // PrefillAsync does not emit one when cancelled internally; without this the
-                // backend strands IsPrefilling=true (socket stays connected) and 409s forever.
-                // No distinct "cancelled" wire state exists on the progress reporter, so reuse
-                // the existing terminal error event.
-                _progress.OnError("Prefill cancelled by user");
-            }
-            catch (Exception ex)
-            {
-                // Emit a terminal error event so the backend's terminal funnel fires and clears
-                // IsPrefilling; PrefillAsync may throw without emitting a terminal event itself.
-                _progress.OnError($"Prefill failed: {ex.Message}", ex);
-            }
-            finally
-            {
-                _isPrefilling = false;
-                _prefillCts?.Dispose();
-                _prefillCts = null;
-            }
-        }, _prefillCts.Token);
+                Id = request.Id,
+                Success = false,
+                Error = "A prefill is already in progress",
+                CompletedAt = DateTime.UtcNow
+            };
+        }
 
         return new CommandResponse
         {
@@ -347,7 +389,7 @@ public sealed class SocketCommandInterface : IDisposable
         if (_disposed) return;
 
         _cts.Cancel();
-        _prefillCts?.Dispose();
+        _prefillOperation.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _cts.Dispose();
         _api.Dispose();
         _socketServer.DisposeAsync().AsTask().GetAwaiter().GetResult();
@@ -359,23 +401,34 @@ public sealed class SocketCommandInterface : IDisposable
     /// <summary>
     /// Progress implementation that broadcasts updates via socket.
     /// </summary>
-    private sealed class SocketProgress : IPrefillProgress
+    internal sealed class SocketProgress : IPrefillProgress
     {
+        private readonly DaemonLogSink _logSink;
         public SocketServer? SocketServer { get; set; }
         private DateTime _lastProgressBroadcast = DateTime.MinValue;
         private static readonly TimeSpan BroadcastThrottle = TimeSpan.FromMilliseconds(250);
 
+        internal SocketProgress(
+            Action<string>? writeLine = null,
+            DaemonLogLevel? minimumLevel = null)
+        {
+            _logSink = new DaemonLogSink(
+                writeLine ?? (static message => Console.WriteLine(message)),
+                minimumLevel ?? (AppConfig.VerboseLogs ? DaemonLogLevel.Debug : DaemonLogLevel.Info));
+        }
+
         public void OnLog(LogLevel level, string message)
         {
-            var prefix = level switch
+            var daemonLevel = level switch
             {
-                LogLevel.Debug => "[DEBUG]",
-                LogLevel.Info => "[INFO]",
-                LogLevel.Warning => "[WARN]",
-                LogLevel.Error => "[ERROR]",
-                _ => "[LOG]"
+                LogLevel.Debug => DaemonLogLevel.Debug,
+                LogLevel.Info => DaemonLogLevel.Info,
+                LogLevel.Warning => DaemonLogLevel.Warning,
+                LogLevel.Error => DaemonLogLevel.Error,
+                _ => throw new ArgumentOutOfRangeException(nameof(level), level, null)
             };
-            Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss} {prefix} {message}");
+            var prefix = level == LogLevel.Warning ? "[WARN]" : $"[{level.ToString().ToUpperInvariant()}]";
+            _logSink.Write(daemonLevel, $"{DateTime.UtcNow:HH:mm:ss} {prefix} {message}");
         }
 
         public void OnOperationStarted(string operationName)
@@ -476,6 +529,17 @@ public sealed class SocketCommandInterface : IDisposable
                 FailedApps = summary.FailedApps,
                 TotalBytesTransferred = summary.TotalBytesTransferred,
                 TotalTime = summary.TotalTime,
+                UpdatedAt = DateTime.UtcNow
+            });
+        }
+
+        public void OnPrefillCancelled(string message)
+        {
+            OnLog(LogLevel.Info, message);
+            BroadcastProgress(new PrefillProgressUpdate
+            {
+                State = "cancelled",
+                ErrorMessage = message,
                 UpdatedAt = DateTime.UtcNow
             });
         }

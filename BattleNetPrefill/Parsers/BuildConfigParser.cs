@@ -2,7 +2,10 @@
 {
     public static class BuildConfigParser
     {
-        public static async Task<BuildConfigFile> GetBuildConfigAsync(VersionsEntry versionsEntry, CdnRequestManager cdnRequestManager)
+        public static async Task<BuildConfigFile> GetBuildConfigAsync(
+            VersionsEntry versionsEntry,
+            CdnRequestManager cdnRequestManager,
+            CancellationToken cancellationToken = default)
         {
             var buildConfig = new BuildConfigFile();
 
@@ -17,7 +20,14 @@
             string content;
             try
             {
-                content = Encoding.UTF8.GetString(await cdnRequestManager.GetRequestAsBytesAsync(RootFolder.config, versionsEntry.buildConfig));
+                content = Encoding.UTF8.GetString(await cdnRequestManager.GetRequestAsBytesAsync(
+                    RootFolder.config,
+                    versionsEntry.buildConfig,
+                    cancellationToken: cancellationToken));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {

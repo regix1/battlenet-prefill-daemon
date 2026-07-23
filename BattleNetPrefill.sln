@@ -7,6 +7,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "BattleNetPrefill", "BattleN
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "LancachePrefill.Common", "LancachePrefill.Common\dotnet\LancachePrefill.Common.csproj", "{42A39A83-50EC-4F02-B14C-77C3EF860DD9}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "BattleNetPrefill.Test", "BattleNetPrefill.Test\BattleNetPrefill.Test.csproj", "{B1B57E26-8D88-4B04-93B8-CC3E9C73C179}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{42A39A83-50EC-4F02-B14C-77C3EF860DD9}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{42A39A83-50EC-4F02-B14C-77C3EF860DD9}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{42A39A83-50EC-4F02-B14C-77C3EF860DD9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B1B57E26-8D88-4B04-93B8-CC3E9C73C179}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B1B57E26-8D88-4B04-93B8-CC3E9C73C179}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B1B57E26-8D88-4B04-93B8-CC3E9C73C179}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B1B57E26-8D88-4B04-93B8-CC3E9C73C179}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

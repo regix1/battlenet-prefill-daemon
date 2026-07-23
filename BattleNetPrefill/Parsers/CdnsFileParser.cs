@@ -3,9 +3,15 @@
     [SuppressMessage("Performance", "CA1861:Avoid constant arrays as arguments", Justification = "Performance isn't an issue here, and implementing this warning's suggestion will impact readability negatively.")]
     public static class CdnsFileParser
     {
-        public static async Task<CdnsEntry[]> ParseCdnsFileAsync(CdnRequestManager cdnRequestManager, TactProduct targetProduct)
+        public static async Task<CdnsEntry[]> ParseCdnsFileAsync(
+            CdnRequestManager cdnRequestManager,
+            TactProduct targetProduct,
+            CancellationToken cancellationToken = default)
         {
-            string content = await cdnRequestManager.MakePatchRequestAsync(targetProduct, PatchRequest.cdns);
+            string content = await cdnRequestManager.MakePatchRequestAsync(
+                targetProduct,
+                PatchRequest.cdns,
+                cancellationToken);
             var lines = content.Split(new[] { "\n", "\r" }, StringSplitOptions.RemoveEmptyEntries)
                                .Where(e => e[0] != '#')
                                .ToArray();

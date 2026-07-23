@@ -29,14 +29,16 @@
         /// bytes are downloaded. Returns the remaining-to-download size for the product; an up-to-date
         /// product reports 0. <see cref="AppConfig.SkipDownloads"/> is always restored.
         /// </summary>
-        public async Task<long> GetProductDownloadSizeAsync(TactProduct product)
+        public async Task<long> GetProductDownloadSizeAsync(
+            TactProduct product,
+            CancellationToken cancellationToken = default)
         {
             var previousSkipDownloads = AppConfig.SkipDownloads;
             var bytesBefore = _prefillSummaryResult.TotalBytesTransferred;
             AppConfig.SkipDownloads = true;
             try
             {
-                await ProcessProductAsync(product);
+                await ProcessProductAsync(product, cancellationToken);
                 var delta = _prefillSummaryResult.TotalBytesTransferred - bytesBefore;
                 return (long)delta.Bytes;
             }
@@ -46,7 +48,9 @@
             }
         }
 
-        public async Task ProcessMultipleProductsAsync(List<TactProduct> productsToProcess)
+        public async Task ProcessMultipleProductsAsync(
+            List<TactProduct> productsToProcess,
+            CancellationToken cancellationToken = default)
         {
             var timer = Stopwatch.StartNew();
 
@@ -56,7 +60,11 @@
             {
                 try
                 {
-                    await ProcessProductAsync(productCode);
+                    await ProcessProductAsync(productCode, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception e)
                 {
@@ -88,10 +96,10 @@
             var installFileHandler = new InstallFileHandler(cdnRequestManager);
             var archiveIndexHandler = new ArchiveIndexHandler(_ansiConsole, cdnRequestManager, product);
             var patchLoader = new PatchLoader(cdnRequestManager);
-            await cdnRequestManager.InitializeAsync(product);
+            await cdnRequestManager.InitializeAsync(product, cancellationToken);
 
             // Finding the latest version of the game
-            VersionsEntry? targetVersion = await configFileHandler.GetLatestVersionEntryAsync(product);
+            VersionsEntry? targetVersion = await configFileHandler.GetLatestVersionEntryAsync(product, cancellationToken);
 
             // Skip prefilling if we've already prefilled the latest version
             if (!_forcePrefill && IsProductUpToDate(product, targetVersion.Value))
@@ -106,18 +114,36 @@
             {
                 // Getting other configuration files for this version, that detail where we can download the required files from.
                 ctx.Status("Getting latest config files...");
-                BuildConfigFile buildConfig = await BuildConfigParser.GetBuildConfigAsync(targetVersion.Value, cdnRequestManager);
-                CDNConfigFile cdnConfig = await configFileHandler.GetCdnConfigAsync(targetVersion.Value);
+                BuildConfigFile buildConfig = await BuildConfigParser.GetBuildConfigAsync(
+                    targetVersion.Value,
+                    cdnRequestManager,
+                    cancellationToken);
+                CDNConfigFile cdnConfig = await configFileHandler.GetCdnConfigAsync(
+                    targetVersion.Value,
+                    cancellationToken);
 
                 ctx.Status("Building Archive Indexes...");
-                await Task.WhenAll(archiveIndexHandler.BuildArchiveIndexesAsync(cdnConfig, ctx),
-                                    downloadFileHandler.ParseDownloadFileAsync(buildConfig));
+                await Task.WhenAll(
+                    archiveIndexHandler.BuildArchiveIndexesAsync(cdnConfig, ctx, cancellationToken),
+                    downloadFileHandler.ParseDownloadFileAsync(buildConfig, cancellationToken));
 
                 // Start processing to determine which files need to be downloaded
                 ctx.Status("Determining files to download...");
-                await installFileHandler.HandleInstallFileAsync(buildConfig, archiveIndexHandler, cdnConfig);
-                await downloadFileHandler.HandleDownloadFileAsync(archiveIndexHandler, cdnConfig, product);
-                await patchLoader.HandlePatchesAsync(buildConfig, product, cdnConfig);
+                await installFileHandler.HandleInstallFileAsync(
+                    buildConfig,
+                    archiveIndexHandler,
+                    cdnConfig,
+                    cancellationToken);
+                await downloadFileHandler.HandleDownloadFileAsync(
+                    archiveIndexHandler,
+                    cdnConfig,
+                    product,
+                    cancellationToken);
+                await patchLoader.HandlePatchesAsync(
+                    buildConfig,
+                    product,
+                    cdnConfig,
+                    cancellationToken);
             });
 
             _ansiConsole.LogMarkupLine("Retrieved product metadata", metadataTimer);

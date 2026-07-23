@@ -22,9 +22,13 @@
         /// <param name="archiveIndexHandler"></param>
         /// <param name="cdnConfigFile"></param>
         /// <returns></returns>
-        public async Task HandleInstallFileAsync(BuildConfigFile buildConfig, ArchiveIndexHandler archiveIndexHandler, CDNConfigFile cdnConfigFile)
+        public async Task HandleInstallFileAsync(
+            BuildConfigFile buildConfig,
+            ArchiveIndexHandler archiveIndexHandler,
+            CDNConfigFile cdnConfigFile,
+            CancellationToken cancellationToken = default)
         {
-            InstallFile installFile = await ParseInstallFileAsync(buildConfig);
+            InstallFile installFile = await ParseInstallFileAsync(buildConfig, cancellationToken);
 
             List<InstallFileEntry> filtered = installFile.entries
                     .Where(e => e.tags.Contains("1=enUS") && e.tags.Contains("2=Windows"))
@@ -36,7 +40,7 @@
             }
 
             var encodingFileHandler = new EncodingFileHandler(_cdnRequestManager);
-            EncodingFile encodingTable = await encodingFileHandler.GetEncodingAsync(buildConfig);
+            EncodingFile encodingTable = await encodingFileHandler.GetEncodingAsync(buildConfig, cancellationToken);
 
             foreach (var file in filtered)
             {
@@ -64,11 +68,18 @@
             }
         }
 
-        private async Task<InstallFile> ParseInstallFileAsync(BuildConfigFile buildConfig)
+        private async Task<InstallFile> ParseInstallFileAsync(
+            BuildConfigFile buildConfig,
+            CancellationToken cancellationToken)
         {
             var install = new InstallFile();
             var endBytes = Math.Max(4095, buildConfig.installSize[1] - 1);
-            byte[] content = await _cdnRequestManager.GetRequestAsBytesAsync(RootFolder.data, buildConfig.install[1], startBytes: 0, endBytes: endBytes);
+            byte[] content = await _cdnRequestManager.GetRequestAsBytesAsync(
+                RootFolder.data,
+                buildConfig.install[1],
+                startBytes: 0,
+                endBytes: endBytes,
+                cancellationToken: cancellationToken);
 
             using var memoryStream = BLTE.Parse(content);
             using BinaryReader bin = new BinaryReader(memoryStream);

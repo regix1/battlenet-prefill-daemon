@@ -9,7 +9,11 @@
             _cdnRequestManager = cdnRequestManager;
         }
 
-        public async Task HandlePatchesAsync(BuildConfigFile buildConfig, TactProduct targetProduct, CDNConfigFile cdnConfig)
+        public async Task HandlePatchesAsync(
+            BuildConfigFile buildConfig,
+            TactProduct targetProduct,
+            CDNConfigFile cdnConfig,
+            CancellationToken cancellationToken = default)
         {
             // For whatever reason, these products do not actually make this request
             var patchConfigExclusions = new List<TactProduct>
@@ -25,7 +29,10 @@
             if (buildConfig.patch != null)
             {
                 // Downloads the patch since the real client does, but we don't use it for anything.
-                await _cdnRequestManager.GetRequestAsBytesAsync(RootFolder.patch, buildConfig.patch.Value);
+                await _cdnRequestManager.GetRequestAsBytesAsync(
+                    RootFolder.patch,
+                    buildConfig.patch.Value,
+                    cancellationToken: cancellationToken);
             }
 
             // Unused by Hearthstone

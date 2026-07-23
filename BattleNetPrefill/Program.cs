@@ -10,23 +10,14 @@ namespace BattleNetPrefill
             {
                 ParseHiddenFlags();
 
-                Console.WriteLine($"""
-                    ╔═══════════════════════════════════════════════════════════╗
-                    ║              BattleNetPrefill Daemon                      ║
-                    ║                  v{ThisAssembly.Info.InformationalVersion,-20}             ║
-                    ╚═══════════════════════════════════════════════════════════╝
-
-                    Battle.net content is anonymous - no account login required.
-
-                    """);
+                Console.WriteLine($"BattleNetPrefill daemon v{ThisAssembly.Info.InformationalVersion}");
 
                 var tcpPortEnv = Environment.GetEnvironmentVariable("PREFILL_TCP_PORT");
                 var useTcp = int.TryParse(tcpPortEnv, out var tcpPort) && tcpPort > 0;
 
                 if (!useTcp)
                 {
-                    Console.WriteLine("Using Unix Domain Socket for reliable, low-latency IPC.");
-                    Console.WriteLine();
+                    Console.WriteLine("Using Unix domain socket transport.");
                 }
 
                 var responsesDir = Environment.GetEnvironmentVariable("PREFILL_RESPONSES_DIR") ?? "/responses";

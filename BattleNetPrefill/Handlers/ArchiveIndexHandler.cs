@@ -49,7 +49,10 @@
         /// <summary>
         /// Downloads all archive indexes, and builds the archive index lookup dictionary for the specified product.
         /// </summary>
-        public async Task BuildArchiveIndexesAsync(CDNConfigFile cdnConfig, StatusContext ctx)
+        public async Task BuildArchiveIndexesAsync(
+            CDNConfigFile cdnConfig,
+            StatusContext ctx,
+            CancellationToken cancellationToken = default)
         {
             _statusContext = ctx;
 
@@ -77,7 +80,7 @@
                 {
                     continue;
                 }
-                tasks.Add(ProcessArchiveAsync(cdnConfig, lowerLimit, upperLimit));
+                tasks.Add(ProcessArchiveAsync(cdnConfig, lowerLimit, upperLimit, cancellationToken));
             }
             await Task.WhenAll(tasks);
 
@@ -88,7 +91,11 @@
             }
         }
 
-        private async Task<Dictionary<MD5Hash, ArchiveIndexEntry>> ProcessArchiveAsync(CDNConfigFile cdnConfig, int start, int finish)
+        private async Task<Dictionary<MD5Hash, ArchiveIndexEntry>> ProcessArchiveAsync(
+            CDNConfigFile cdnConfig,
+            int start,
+            int finish,
+            CancellationToken cancellationToken)
         {
             int initialDictionarySize = ComputeInitialDictionarySize();
             var indexDictionary = new Dictionary<MD5Hash, ArchiveIndexEntry>(initialDictionarySize, Md5HashEqualityComparer.Instance);
@@ -98,7 +105,12 @@
 
             for (int i = start; i <= finish; i++)
             {
-                byte[] indexContent = await _cdnRequestManager.GetRequestAsBytesAsync(RootFolder.data, cdnConfig.archives[i].hashIdMd5, isIndex: true);
+                cancellationToken.ThrowIfCancellationRequested();
+                byte[] indexContent = await _cdnRequestManager.GetRequestAsBytesAsync(
+                    RootFolder.data,
+                    cdnConfig.archives[i].hashIdMd5,
+                    isIndex: true,
+                    cancellationToken: cancellationToken);
 
                 using var stream = new MemoryStream(indexContent);
                 using BinaryReader br = new BinaryReader(stream);

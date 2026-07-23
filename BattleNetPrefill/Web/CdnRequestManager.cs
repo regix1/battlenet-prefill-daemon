@@ -43,7 +43,7 @@
         /// <summary>
         /// The URL/IP Address where the Lancache has been detected.
         /// </summary>
-        private string _lancacheAddress;
+        private string _lancacheAddress = string.Empty;
 
         /// <summary>
         /// The lancache server IP/host all CDN requests are routed through (URL-rewrite + Host-header spoof).
@@ -70,7 +70,7 @@
         /// <summary>
         /// The root path used to find the product's data on the CDN.  Must be queried from the patch API.
         /// </summary>
-        private string _productBasePath;
+        private string _productBasePath = string.Empty;
 
         private readonly List<Request> _queuedRequests = new List<Request>();
 
@@ -86,9 +86,35 @@
         #endregion
 
         public CdnRequestManager(IAnsiConsole ansiConsole, IPrefillProgress? progress = null, string? progressAppId = null, string? progressAppName = null)
+            : this(ansiConsole, new HttpClient(), progress, progressAppId, progressAppName)
+        {
+        }
+
+        internal CdnRequestManager(
+            IAnsiConsole ansiConsole,
+            HttpClient client,
+            string lancacheAddress,
+            string productBasePath,
+            IPrefillProgress? progress = null,
+            string? progressAppId = null,
+            string? progressAppName = null)
+            : this(ansiConsole, client, progress, progressAppId, progressAppName)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(lancacheAddress);
+            ArgumentException.ThrowIfNullOrWhiteSpace(productBasePath);
+            _lancacheAddress = lancacheAddress;
+            _productBasePath = productBasePath;
+        }
+
+        private CdnRequestManager(
+            IAnsiConsole ansiConsole,
+            HttpClient client,
+            IPrefillProgress? progress,
+            string? progressAppId,
+            string? progressAppName)
         {
             _ansiConsole = ansiConsole;
-            _client = new HttpClient();
+            _client = client ?? throw new ArgumentNullException(nameof(client));
             _progress = progress ?? NullProgress.Instance;
             _progressAppId = progressAppId ?? string.Empty;
             _progressAppName = progressAppName ?? string.Empty;
@@ -97,10 +123,10 @@
         /// <summary>
         /// Initialization logic must be called prior to using this class.  Determines which root folder to download the CDN data from
         /// </summary>
-        public async Task InitializeAsync(TactProduct currentProduct)
+        public async Task InitializeAsync(TactProduct currentProduct, CancellationToken cancellationToken = default)
         {
             // Loading current CDNs
-            var entries = await CdnsFileParser.ParseCdnsFileAsync(this, currentProduct);
+            var entries = await CdnsFileParser.ParseCdnsFileAsync(this, currentProduct, cancellationToken);
 
             // Adds any missing CDN hosts
             foreach (var host in entries.SelectMany(e => e.hosts))
@@ -112,7 +138,9 @@
             }
 
             _productBasePath = entries[0].path;
-            _lancacheAddress = await LancacheIpResolver.ResolveLancacheIpAsync(_ansiConsole, _currentCdn);
+            _lancacheAddress = await LancacheIpResolver
+                .ResolveLancacheIpAsync(_ansiConsole, _currentCdn)
+                .WaitAsync(cancellationToken);
         }
 
         #region Queued Request Handling
@@ -259,9 +287,13 @@
             {
                 try
                 {
-                    await DownloadRequestAsync(request, forceRecache);
+                    await DownloadRequestAsync(request, ct, forceRecache);
                 }
-                catch
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception)
                 {
                     failedRequests.Add(request);
                 }
@@ -309,18 +341,26 @@
         ///                              This can be used with "non-required" requests, to speed up processing since we only care about reading the data once to prefill.
         /// </param>
         /// <returns></returns>
-        public async Task<byte[]> GetRequestAsBytesAsync(RootFolder rootPath, MD5Hash hash, bool isIndex = false,
-            bool writeToDevNull = false, long? startBytes = null, long? endBytes = null)
+        public async Task<byte[]> GetRequestAsBytesAsync(
+            RootFolder rootPath,
+            MD5Hash hash,
+            bool isIndex = false,
+            bool writeToDevNull = false,
+            long? startBytes = null,
+            long? endBytes = null,
+            CancellationToken cancellationToken = default)
         {
             Request request = new Request(_productBasePath, rootPath, hash, startBytes, endBytes, isIndex);
-            return await AppConfig.RetryPolicy.ExecuteAsync(async () =>
-            {
-                return await GetRequestAsBytes_SingleRequestAsync(request);
-            });
+            return await AppConfig.RetryPolicy.ExecuteAsync(
+                token => GetRequestAsBytes_SingleRequestAsync(request, token),
+                cancellationToken);
         }
 
         //TODO not a fan of how many times forceRecache is passed down
-        private async Task<byte[]> GetRequestAsBytes_SingleRequestAsync(Request request, bool forceRecache = false)
+        private async Task<byte[]> GetRequestAsBytes_SingleRequestAsync(
+            Request request,
+            CancellationToken cancellationToken,
+            bool forceRecache = false)
         {
             allRequestsMade.Add(request);
 
@@ -336,7 +376,7 @@
                 string outputFilePath = AppConfig.CacheDir + uri.AbsolutePath;
                 if (File.Exists(outputFilePath))
                 {
-                    return await File.ReadAllBytesAsync(outputFilePath);
+                    return await File.ReadAllBytesAsync(outputFilePath, cancellationToken);
                 }
             }
 
@@ -347,15 +387,26 @@
                 requestMessage.Headers.Range = new RangeHeaderValue(request.LowerByteRange, request.UpperByteRange);
             }
 
-            using var cts = new CancellationTokenSource();
-            using var responseMessage = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cts.Token);
-            await using Stream responseStream = await responseMessage.Content.ReadAsStreamAsync(cts.Token);
-            responseMessage.EnsureSuccessStatusCode();
+            byte[] byteArray;
+            using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            try
+            {
+                using var responseMessage = await _client.SendAsync(
+                    requestMessage,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    requestCancellation.Token);
+                await using Stream responseStream = await responseMessage.Content.ReadAsStreamAsync(requestCancellation.Token);
+                responseMessage.EnsureSuccessStatusCode();
 
-            await using var memoryStream = new MemoryStream();
-            await responseStream.CopyToAsync(memoryStream, cts.Token);
+                await using var memoryStream = new MemoryStream();
+                await responseStream.CopyToAsync(memoryStream, requestCancellation.Token);
+                byteArray = memoryStream.ToArray();
+            }
+            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new HttpRequestException($"Timed out downloading {uri}", exception);
+            }
 
-            var byteArray = memoryStream.ToArray();
             // Prevents the response from being cached to disk when --no-cache is specified
             if (AppConfig.NoLocalCache)
             {
@@ -365,13 +416,16 @@
             // Cache to disk
             FileInfo file = new FileInfo(AppConfig.CacheDir + uri.AbsolutePath);
             file.Directory.Create();
-            await File.WriteAllBytesAsync(file.FullName, byteArray, cts.Token);
+            await File.WriteAllBytesAsync(file.FullName, byteArray, cancellationToken);
 
             return await Task.FromResult(byteArray);
         }
 
         //TODO comment the difference
-        private async Task DownloadRequestAsync(Request request, bool forceRecache = false)
+        private async Task DownloadRequestAsync(
+            Request request,
+            CancellationToken cancellationToken,
+            bool forceRecache = false)
         {
             allRequestsMade.Add(request);
 
@@ -388,14 +442,17 @@
                 requestMessage.Headers.Range = new RangeHeaderValue(request.LowerByteRange, request.UpperByteRange);
             }
 
-            using var cts = new CancellationTokenSource();
-            using var responseMessage = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cts.Token);
-            await using Stream responseStream = await responseMessage.Content.ReadAsStreamAsync(cts.Token);
+            using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var responseMessage = await _client.SendAsync(
+                requestMessage,
+                HttpCompletionOption.ResponseHeadersRead,
+                requestCancellation.Token);
+            await using Stream responseStream = await responseMessage.Content.ReadAsStreamAsync(requestCancellation.Token);
             responseMessage.EnsureSuccessStatusCode();
 
             // Don't save the data anywhere, so we don't have to waste time writing it to disk.
             var buffer = new byte[4096];
-            while (await responseStream.ReadAsync(buffer, cts.Token) != 0)
+            while (await responseStream.ReadAsync(buffer, requestCancellation.Token) != 0)
             {
             }
         }
@@ -406,23 +463,29 @@
         /// https://wowdev.wiki/TACT#HTTP_URLs
         /// </summary>
         /// <returns></returns>
-        public async Task<string> MakePatchRequestAsync(TactProduct tactProduct, PatchRequest endpoint)
+        public async Task<string> MakePatchRequestAsync(
+            TactProduct tactProduct,
+            PatchRequest endpoint,
+            CancellationToken cancellationToken = default)
         {
             var cacheFile = $"{AppConfig.CacheDir}/{endpoint.Name}-{tactProduct.ProductCode}.txt";
 
             // Load cached version, only valid for 30 minutes so that updated versions don't get accidentally ignored
             if (!AppConfig.NoLocalCache && File.Exists(cacheFile) && DateTime.Now < File.GetLastWriteTime(cacheFile).AddMinutes(30))
             {
-                return await File.ReadAllTextAsync(cacheFile);
+                return await File.ReadAllTextAsync(cacheFile, cancellationToken);
             }
 
-            using HttpResponseMessage response = await _client.GetAsync(new Uri($"{AppConfig.BattleNetPatchUri}{tactProduct.ProductCode}/{endpoint.Name}"));
+            using HttpResponseMessage response = await _client.GetAsync(
+                new Uri($"{AppConfig.BattleNetPatchUri}{tactProduct.ProductCode}/{endpoint.Name}"),
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 throw new Exception("Error during retrieving HTTP cdns: Received bad HTTP code " + response.StatusCode);
             }
             using HttpContent res = response.Content;
-            string content = await res.ReadAsStringAsync();
+            string content = await res.ReadAsStringAsync(cancellationToken);
 
             if (AppConfig.NoLocalCache)
             {
@@ -430,7 +493,7 @@
             }
 
             // Writes results to disk, to be used as cache later
-            await File.WriteAllTextAsync(cacheFile, content);
+            await File.WriteAllTextAsync(cacheFile, content, cancellationToken);
             return content;
         }
 
