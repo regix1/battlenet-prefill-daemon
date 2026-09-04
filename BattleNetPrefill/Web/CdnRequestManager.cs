@@ -30,6 +30,41 @@
         /// <summary>Throttle window for live byte-progress emits (matches the socket BroadcastThrottle).</summary>
         private static readonly TimeSpan ProgressThrottle = TimeSpan.FromMilliseconds(250);
 
+        /// <summary>
+        /// How long a response may go without producing data before the transfer is treated as dead.  Requests are
+        /// made with <see cref="HttpCompletionOption.ResponseHeadersRead"/>, which returns as soon as the headers
+        /// arrive and leaves every subsequent read on the body outside <see cref="HttpClient.Timeout"/>.  Without
+        /// this, a CDN that sends headers and then stops sending bytes stalls the prefill with no error at all.
+        /// </summary>
+        private static readonly TimeSpan ResponseBodyTimeout = TimeSpan.FromSeconds(90);
+
+        /// <summary>
+        /// How long the client waits for response headers.  Because the requests use
+        /// <see cref="HttpCompletionOption.ResponseHeadersRead"/>, this covers only the wait up to the headers and
+        /// then stops applying, so it ADDS to whatever bound the body read has rather than sharing it.  The BCL
+        /// default of 100 seconds made that sum long enough to matter; waiting 30 seconds for headers is already
+        /// far more than a cache serving a request needs.
+        /// </summary>
+        private static readonly TimeSpan HeaderTimeout = TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        /// How many requests may fail with nothing at all transferred before the rest of the queue is abandoned.
+        /// A per-request timeout does not bound a download against a dead cache, because the cost is the queue
+        /// length divided by the concurrency, times that timeout.  The small and large batches run together at 15
+        /// and 10 at a time, so this is two full waves of 25: one bad wave is a queue whose early requests fail
+        /// and whose later ones succeed, which must not abandon.  Any single success turns the check off for the
+        /// rest of the attempt, so it can only fire on a source giving back nothing whatsoever.
+        /// </summary>
+        private const int FailuresBeforeSourceIsDown = 50;
+
+        /// <summary>
+        /// Deadline for one attempt at a single config or index request.  Shorter than <see cref="ResponseBodyTimeout"/>
+        /// because these responses are small and every one of them is retried, so the per-attempt figure multiplies:
+        /// three attempts at this length give up on a dead host in about two minutes rather than tying up a whole
+        /// scheduled run.  Bulk content does not come through here, it goes through DownloadRequestAsync.
+        /// </summary>
+        private static readonly TimeSpan SingleRequestTimeout = TimeSpan.FromSeconds(40);
+
         private readonly List<string> _cdnList = new List<string>
         {
             "level3.blizzard.com",  // Level3
@@ -86,7 +121,7 @@
         #endregion
 
         public CdnRequestManager(IAnsiConsole ansiConsole, IPrefillProgress? progress = null, string? progressAppId = null, string? progressAppName = null)
-            : this(ansiConsole, new HttpClient(), progress, progressAppId, progressAppName)
+            : this(ansiConsole, new HttpClient { Timeout = HeaderTimeout }, progress, progressAppId, progressAppName)
         {
         }
 
@@ -206,17 +241,26 @@
 
             var downloadTimer = Stopwatch.StartNew();
             var failedRequests = new ConcurrentBag<Request>();
+            var anyRequestSucceeded = false;
             await _ansiConsole.CreateSpectreProgress(AppConfig.TransferSpeedUnit).StartAsync(async ctx =>
             {
                 //TODO can probably cleanup this attempt 3 times logic since there is the polly stuff in place now.
                 // Run the initial download
+                var attemptedCount = coalescedRequests.Count;
                 failedRequests = await AttemptDownloadAsync(ctx, "Downloading..", coalescedRequests, downloadTimer, cancellationToken);
+                anyRequestSucceeded |= failedRequests.Count < attemptedCount;
 
-                // Handle any failed requests
-                while (failedRequests.Any() && _retryCount < 3)
+                // Handle any failed requests.  Each attempt moves _currentCdn to the next host, so the limit is
+                // the number of hosts to try, not a plain retry count.  Two retries walks all three entries
+                // _cdnList starts with; going further would index past the end when the CDN response adds none.
+                // An attempt that abandons its queue still comes back here, so a dead host does not stop the
+                // next one from being tried.
+                while (failedRequests.Any() && _retryCount < 2)
                 {
                     _retryCount++;
+                    attemptedCount = failedRequests.Count;
                     failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {_retryCount}..", failedRequests.ToList(), downloadTimer, cancellationToken);
+                    anyRequestSucceeded |= failedRequests.Count < attemptedCount;
                     await Task.Delay(2000 * _retryCount, cancellationToken);
                 }
             });
@@ -236,6 +280,17 @@
                     BytesPerSecond = finalRate,
                     Elapsed = finalElapsed
                 });
+            }
+
+            // Every host has been tried and not one request came back with data, so report the source as the
+            // problem instead of printing a line per file and reporting the product as merely not updated.
+            if (!anyRequestSucceeded && failedRequests.Any())
+            {
+                throw new TimeoutException(
+                    $"Gave up downloading from {_lancacheAddress}.  Every request failed and not one byte arrived " +
+                    $"across {_retryCount + 1} attempts, the last of them against {_currentCdn}, so the remaining " +
+                    "queue was abandoned rather than waiting on every file in it.  Check that the cache is " +
+                    "running and that it can reach the internet.");
             }
 
             // Handling final failed requests
@@ -268,6 +323,12 @@
 
             var failedRequests = new ConcurrentBag<Request>();
 
+            // Counts requests that finished their read loop.  Deliberately not _progressBytesDownloaded, which is
+            // incremented from the request's estimated size for failed requests too so the progress bar keeps
+            // advancing, and so is a count of work attempted rather than of bytes that arrived.
+            var succeededCount = 0;
+            var sourceIsDown = 0;
+
             // Splitting up small/large requests into two batches.  Splitting into two batches with different # of parallel requests will prevent the small
             // requests from choking out overall throughput.
             var byteThreshold = (long)ByteSize.FromMegaBytes(1).Bytes;
@@ -285,9 +346,17 @@
 
             async Task DownloadRequestWrapper(Request request, CancellationToken ct)
             {
+                // Nothing has arrived from this host, so drain the rest of the queue without asking it again.
+                if (Volatile.Read(ref sourceIsDown) != 0)
+                {
+                    failedRequests.Add(request);
+                    return;
+                }
+
                 try
                 {
                     await DownloadRequestAsync(request, ct, forceRecache);
+                    Interlocked.Increment(ref succeededCount);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -296,6 +365,11 @@
                 catch (Exception)
                 {
                     failedRequests.Add(request);
+                }
+
+                if (Volatile.Read(ref succeededCount) == 0 && failedRequests.Count >= FailuresBeforeSourceIsDown)
+                {
+                    Volatile.Write(ref sourceIsDown, 1);
                 }
 
                 progressTask.Increment(request.TotalBytes);
@@ -389,6 +463,7 @@
 
             byte[] byteArray;
             using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestCancellation.CancelAfter(SingleRequestTimeout);
             try
             {
                 using var responseMessage = await _client.SendAsync(
@@ -443,17 +518,28 @@
             }
 
             using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            using var responseMessage = await _client.SendAsync(
-                requestMessage,
-                HttpCompletionOption.ResponseHeadersRead,
-                requestCancellation.Token);
-            await using Stream responseStream = await responseMessage.Content.ReadAsStreamAsync(requestCancellation.Token);
-            responseMessage.EnsureSuccessStatusCode();
-
-            // Don't save the data anywhere, so we don't have to waste time writing it to disk.
-            var buffer = new byte[4096];
-            while (await responseStream.ReadAsync(buffer, requestCancellation.Token) != 0)
+            requestCancellation.CancelAfter(ResponseBodyTimeout);
+            try
             {
+                using var responseMessage = await _client.SendAsync(
+                    requestMessage,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    requestCancellation.Token);
+                await using Stream responseStream = await responseMessage.Content.ReadAsStreamAsync(requestCancellation.Token);
+                responseMessage.EnsureSuccessStatusCode();
+
+                // Don't save the data anywhere, so we don't have to waste time writing it to disk.
+                var buffer = new byte[4096];
+                while (await responseStream.ReadAsync(buffer, requestCancellation.Token) != 0)
+                {
+                    // Push the deadline out on every chunk that arrives, so this bounds a transfer that has gone
+                    // quiet without capping how long a large but healthy transfer is allowed to take.
+                    requestCancellation.CancelAfter(ResponseBodyTimeout);
+                }
+            }
+            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new HttpRequestException($"Timed out downloading {uri}", exception);
             }
         }
 
@@ -485,7 +571,18 @@
                 throw new Exception("Error during retrieving HTTP cdns: Received bad HTTP code " + response.StatusCode);
             }
             using HttpContent res = response.Content;
-            string content = await res.ReadAsStringAsync(cancellationToken);
+            string content;
+            try
+            {
+                content = await res.ReadAsStringAsync(cancellationToken).WaitAsync(ResponseBodyTimeout, cancellationToken);
+            }
+            catch (TimeoutException exception)
+            {
+                throw new HttpRequestException(
+                    $"Timed out reading the reply from the Battle.net patch service at {AppConfig.BattleNetPatchUri}. " +
+                    "It accepted the request and then stopped sending data.",
+                    exception);
+            }
 
             if (AppConfig.NoLocalCache)
             {
