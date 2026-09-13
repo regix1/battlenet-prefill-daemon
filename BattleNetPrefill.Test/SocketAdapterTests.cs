@@ -13,7 +13,7 @@ public sealed class SocketAdapterTests
     public async Task LegacyPrefillRemainsExclusiveAgainstNewAndOldStarts()
     {
         using var fixture = new ConcurrentPrefillTests.TactFixture();
-        using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
+        await using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
         await commands.StartAsync();
         await using var client = await FramedClient.ConnectAsync(commands.BoundTcpPort);
         await client.SendAsync(new CommandRequest
@@ -37,7 +37,7 @@ public sealed class SocketAdapterTests
     public async Task AcceptedRunSurvivesLostAcknowledgementAndReconnect()
     {
         using var fixture = new ConcurrentPrefillTests.TactFixture();
-        using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
+        await using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
         await commands.StartAsync();
         var id = Guid.NewGuid().ToString("D");
         var first = await FramedClient.ConnectAsync(commands.BoundTcpPort);
@@ -95,7 +95,7 @@ public sealed class SocketAdapterTests
             }
         }
 
-        using var commandInterface = new SocketCommandInterface(0, RunPrefillAsync);
+        await using var commandInterface = new SocketCommandInterface(0, RunPrefillAsync);
         await commandInterface.StartAsync();
         await using var client = await FramedClient.ConnectAsync(commandInterface.BoundTcpPort);
 

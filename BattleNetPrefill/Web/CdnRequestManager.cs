@@ -99,10 +99,10 @@ namespace BattleNetPrefill.Web
         /// Builds the absolute URL a request would be sent to (lancache IP + product path + hash).
         /// Diagnostics only - mirrors how <see cref="GetRequestAsBytesAsync"/> forms its URL.
         /// </summary>
-        public string BuildRequestUrl(RootFolder rootPath, MD5Hash hash, bool isIndex = false)
+        public Uri BuildRequestUrl(RootFolder rootPath, MD5Hash hash, bool isIndex = false)
         {
             var request = new Request(_productBasePath, rootPath, hash, isIndex: isIndex);
-            return $"http://{_lancacheAddress}/{request.Uri}";
+            return new Uri($"http://{_lancacheAddress}/{request.Uri}");
         }
 
         /// <summary>
@@ -267,7 +267,7 @@ namespace BattleNetPrefill.Web
                     //TODO can probably cleanup this attempt 3 times logic since there is the polly stuff in place now.
                     // Run the initial download
                     var attemptedCount = coalescedRequests.Count;
-                    failedRequests = await AttemptDownloadAsync(ctx, "Downloading..", coalescedRequests, downloadTimer, cancellationToken);
+                    failedRequests = await AttemptDownloadAsync(ctx, "Downloading..", coalescedRequests, downloadTimer, cancellationToken: cancellationToken);
                     anyRequestSucceeded |= failedRequests.Count < attemptedCount;
 
                     // Handle any failed requests.  Each attempt moves _currentCdn to the next host, so the limit is
@@ -279,7 +279,7 @@ namespace BattleNetPrefill.Web
                     {
                         _retryCount++;
                         attemptedCount = failedRequests.Count;
-                        failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {_retryCount}..", failedRequests.ToList(), downloadTimer, cancellationToken);
+                        failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {_retryCount}..", failedRequests.ToList(), downloadTimer, cancellationToken: cancellationToken);
                         anyRequestSucceeded |= failedRequests.Count < attemptedCount;
                         await Task.Delay(2000 * _retryCount, cancellationToken);
                     }
@@ -352,7 +352,7 @@ namespace BattleNetPrefill.Web
         /// </summary>
         /// <param name="forceRecache">When specified, will cause the cache to delete the existing cached data for a request, and re-download it again.</param>
         /// <returns>A list of failed requests</returns>
-        private async Task<ConcurrentBag<Request>> AttemptDownloadAsync(ProgressContext ctx, string taskTitle, List<Request> requests, Stopwatch downloadTimer, CancellationToken cancellationToken = default, bool forceRecache = false)
+        private async Task<ConcurrentBag<Request>> AttemptDownloadAsync(ProgressContext ctx, string taskTitle, List<Request> requests, Stopwatch downloadTimer, bool forceRecache = false, CancellationToken cancellationToken = default)
         {
             var progressTask = ctx.AddTask(taskTitle, new ProgressTaskSettings { MaxValue = requests.SumTotalBytes().Bytes });
 

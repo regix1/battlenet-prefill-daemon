@@ -137,7 +137,7 @@ public sealed class PrefillRunTests
         ids[0] = "s1";
         Assert.Equal("d3", Assert.Single(captured.AppIds!));
         Assert.Throws<ArgumentException>(() => fixture.Protocol.Capture(new RunOptions { AppIds = Array.Empty<string>(), MaxConcurrency = 1 }));
-        using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
+        await using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
         await commands.StartAsync();
         await using var client = await SocketAdapterTests.FramedClient.ConnectAsync(commands.BoundTcpPort);
         var request = fixture.Start(Guid.NewGuid().ToString("D"), "d3");

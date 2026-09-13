@@ -1,3 +1,5 @@
+#nullable enable annotations
+
 using BattleNetPrefill.Api;
 
 namespace BattleNetPrefill
@@ -10,14 +12,14 @@ namespace BattleNetPrefill
             {
                 ParseHiddenFlags();
 
-                Console.WriteLine($"BattleNetPrefill daemon v{ThisAssembly.Info.InformationalVersion}");
+                AnsiConsole.WriteLine($"BattleNetPrefill daemon v{ThisAssembly.Info.InformationalVersion}");
 
                 var tcpPortEnv = Environment.GetEnvironmentVariable("PREFILL_TCP_PORT");
                 var useTcp = int.TryParse(tcpPortEnv, out var tcpPort) && tcpPort > 0;
 
                 if (!useTcp)
                 {
-                    Console.WriteLine("Using Unix domain socket transport.");
+                    AnsiConsole.WriteLine("Using Unix domain socket transport.");
                 }
 
                 var responsesDir = Environment.GetEnvironmentVariable("PREFILL_RESPONSES_DIR") ?? "/responses";
@@ -29,8 +31,14 @@ namespace BattleNetPrefill
                 Console.CancelKeyPress += (_, e) =>
                 {
                     e.Cancel = true;
-                    Console.WriteLine("\nShutdown signal received...");
+                    AnsiConsole.WriteLine("\nShutdown signal received...");
+#pragma warning disable AsyncFixer02 // Console signal callbacks cannot await asynchronous cancellation.
+#pragma warning disable CA1849
+#pragma warning disable VSTHRD103
                     cts.Cancel();
+#pragma warning restore VSTHRD103
+#pragma warning restore CA1849
+#pragma warning restore AsyncFixer02
                 };
 
                 using var maxLifetimeTimer = StartMaxLifetimeTimer(cts);
@@ -52,10 +60,10 @@ namespace BattleNetPrefill
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Fatal error: {e.Message}");
+                AnsiConsole.WriteLine($"Fatal error: {e.Message}");
                 if (AppConfig.VerboseLogs)
                 {
-                    Console.WriteLine(e.StackTrace);
+                    AnsiConsole.WriteLine(e.StackTrace ?? string.Empty);
                 }
                 return 1;
             }
@@ -69,13 +77,19 @@ namespace BattleNetPrefill
                 return null;
             }
 
-            Console.WriteLine($"Max lifetime set to {maxLifetimeSeconds} seconds. Daemon will self-shutdown after this period.");
+            AnsiConsole.WriteLine($"Max lifetime set to {maxLifetimeSeconds} seconds. Daemon will self-shutdown after this period.");
 
             return new System.Threading.Timer(
                 _ =>
                 {
-                    Console.WriteLine($"\nMax lifetime of {maxLifetimeSeconds} seconds reached. Shutting down daemon...");
+                    AnsiConsole.WriteLine($"\nMax lifetime of {maxLifetimeSeconds} seconds reached. Shutting down daemon...");
+#pragma warning disable AsyncFixer02 // Timer callbacks cannot await asynchronous cancellation.
+#pragma warning disable CA1849
+#pragma warning disable VSTHRD103
                     cts.Cancel();
+#pragma warning restore VSTHRD103
+#pragma warning restore CA1849
+#pragma warning restore AsyncFixer02
                 },
                 state: null,
                 dueTime: TimeSpan.FromSeconds(maxLifetimeSeconds),
@@ -88,27 +102,29 @@ namespace BattleNetPrefill
 
             if (args.Any(e => e.Contains("--debug")) || args.Any(e => e.Contains("--verbose")))
             {
-                Console.WriteLine($"Using verbose logging flag. Displaying verbose logging...");
+                AnsiConsole.WriteLine($"Using verbose logging flag. Displaying verbose logging...");
                 AppConfig.VerboseLogs = true;
             }
 
             if (args.Any(e => e.Contains("--no-download")))
             {
-                Console.WriteLine($"Using --no-download flag. Will skip downloading chunks...");
+                AnsiConsole.WriteLine($"Using --no-download flag. Will skip downloading chunks...");
                 AppConfig.SkipDownloads = true;
             }
 
             if (args.Any(e => e.Contains("--nocache")) || args.Any(e => e.Contains("--no-cache")))
             {
-                Console.WriteLine($"Using --nocache flag. Will always re-download indexes...");
+                AnsiConsole.WriteLine($"Using --nocache flag. Will always re-download indexes...");
                 AppConfig.NoLocalCache = true;
             }
 
             if (AppConfig.VerboseLogs || AppConfig.SkipDownloads || AppConfig.NoLocalCache)
             {
-                Console.WriteLine();
-                Console.WriteLine(new string('─', 60));
+                AnsiConsole.WriteLine();
+                AnsiConsole.WriteLine(new string('─', 60));
             }
         }
     }
 }
+
+#nullable restore annotations

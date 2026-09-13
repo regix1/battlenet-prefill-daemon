@@ -13,7 +13,7 @@ namespace BattleNetPrefill.Api;
 /// (PREFILL_SOCKET_SECRET) is handled by <see cref="SocketServer"/> and is unrelated to any
 /// Battle.net account.
 /// </summary>
-public sealed class SocketCommandInterface : IDisposable
+public sealed class SocketCommandInterface : IAsyncDisposable
 {
     private readonly SocketServer _socketServer;
     private readonly SocketProgress _progress;
@@ -556,15 +556,15 @@ public sealed class SocketCommandInterface : IDisposable
     private RunSnapshot? Cancel(string operationId)
         => _prefillOperation.Cancel(operationId, _protocol.DaemonInstanceId);
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
 
-        _cts.Cancel();
-        _prefillOperation.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        await _cts.CancelAsync();
+        await _prefillOperation.DisposeAsync().AsTask();
         _cts.Dispose();
         _api.Dispose();
-        _socketServer.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        await _socketServer.DisposeAsync();
         _disposed = true;
 
         GC.SuppressFinalize(this);
@@ -585,7 +585,7 @@ public sealed class SocketCommandInterface : IDisposable
             DaemonLogLevel? minimumLevel = null)
         {
             _logSink = new DaemonLogSink(
-                writeLine ?? (static message => Console.WriteLine(message)),
+                writeLine ?? (static message => AnsiConsole.WriteLine(message)),
                 minimumLevel ?? (AppConfig.VerboseLogs ? DaemonLogLevel.Debug : DaemonLogLevel.Info));
         }
 

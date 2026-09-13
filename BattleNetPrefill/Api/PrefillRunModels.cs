@@ -18,7 +18,9 @@ public class PrefillOptions
     /// Optional explicit list of TACT product codes to prefill. When empty, falls back to
     /// the selected-apps file (or the full catalog when <see cref="DownloadAllOwnedGames"/> is set).
     /// </summary>
+#pragma warning disable CA2227 // The socket request serializer replaces this collection from JSON.
     public List<string>? Products { get; set; }
+#pragma warning restore CA2227
 }
 
 public class PrefillResult
@@ -90,7 +92,9 @@ public class CommandRequest
 {
     public string Id { get; set; } = string.Empty;
     public string Type { get; set; } = string.Empty;
+#pragma warning disable CA2227 // The socket request serializer replaces this collection from JSON.
     public Dictionary<string, string>? Parameters { get; set; }
+#pragma warning restore CA2227
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 

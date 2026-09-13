@@ -52,7 +52,7 @@ public sealed class ConcurrentPrefillTests
     public async Task ThreeProductBodiesOverlapAndTargetedCancelPreservesSiblings()
     {
         using var fixture = new TactFixture();
-        using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
+        await using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
         await commands.StartAsync();
         await using var client = await SocketAdapterTests.FramedClient.ConnectAsync(commands.BoundTcpPort);
         var products = new[] { "d3", "fenris", "s1" };

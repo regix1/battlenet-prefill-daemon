@@ -1,5 +1,6 @@
 #nullable enable
 
+
 namespace BattleNetPrefill.Api;
 
 /// <summary>
@@ -11,13 +12,13 @@ public static class DaemonMode
         string socketPath = "/responses/daemon.sock",
         CancellationToken cancellationToken = default)
     {
-        Console.WriteLine($"Starting BattleNetPrefill daemon on Unix socket {socketPath}");
+        AnsiConsole.WriteLine($"Starting BattleNetPrefill daemon on Unix socket {socketPath}");
 
-        using var socketInterface = new SocketCommandInterface(socketPath);
+        await using var socketInterface = new SocketCommandInterface(socketPath);
 
         await socketInterface.StartAsync(cancellationToken);
 
-        Console.WriteLine("Daemon started. Waiting for connections...");
+        AnsiConsole.WriteLine("Daemon started. Waiting for connections...");
 
         try
         {
@@ -25,24 +26,24 @@ public static class DaemonMode
         }
         catch (OperationCanceledException)
         {
-            Console.WriteLine("Daemon shutdown requested...");
+            AnsiConsole.WriteLine("Daemon shutdown requested...");
         }
 
         await socketInterface.StopAsync();
-        Console.WriteLine("Daemon stopped.");
+        AnsiConsole.WriteLine("Daemon stopped.");
     }
 
     public static async Task RunTcpAsync(
         int port,
         CancellationToken cancellationToken = default)
     {
-        Console.WriteLine($"Starting BattleNetPrefill daemon on TCP port {port}");
+        AnsiConsole.WriteLine($"Starting BattleNetPrefill daemon on TCP port {port}");
 
-        using var socketInterface = new SocketCommandInterface(port);
+        await using var socketInterface = new SocketCommandInterface(port);
 
         await socketInterface.StartAsync(cancellationToken);
 
-        Console.WriteLine("Daemon started. Waiting for connections...");
+        AnsiConsole.WriteLine("Daemon started. Waiting for connections...");
 
         try
         {
@@ -50,10 +51,10 @@ public static class DaemonMode
         }
         catch (OperationCanceledException)
         {
-            Console.WriteLine("Daemon shutdown requested...");
+            AnsiConsole.WriteLine("Daemon shutdown requested...");
         }
 
         await socketInterface.StopAsync();
-        Console.WriteLine("Daemon stopped.");
+        AnsiConsole.WriteLine("Daemon stopped.");
     }
 }

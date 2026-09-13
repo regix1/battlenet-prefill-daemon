@@ -14,7 +14,7 @@
             // daemon rewrites every CDN request to http://{LANCACHE_IP}/<path> with a Host header of
             // the CDN host - if LANCACHE_IP points at something that isn't a lancache (e.g. the
             // lancache-manager app), this read returns non-CDN content and we fail below.
-            string buildConfigUrl = cdnRequestManager.BuildRequestUrl(RootFolder.config, versionsEntry.buildConfig);
+            Uri buildConfigUrl = cdnRequestManager.BuildRequestUrl(RootFolder.config, versionsEntry.buildConfig);
             string lancacheAddress = cdnRequestManager.LancacheAddress;
 
             string content;
