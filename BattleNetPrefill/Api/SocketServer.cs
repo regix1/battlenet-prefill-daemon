@@ -434,6 +434,7 @@ public sealed class SocketServer : IAsyncDisposable
         public CancellationTokenSource CancellationTokenSource { get; } = new();
         public CancellationToken CancellationToken => CancellationTokenSource.Token;
         public bool IsAuthenticated { get; set; }
+        private int _disposed;
 
         public ConnectedClient(string id, Socket socket)
         {
@@ -444,6 +445,11 @@ public sealed class SocketServer : IAsyncDisposable
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
             CancellationTokenSource.Cancel();
             CancellationTokenSource.Dispose();
             SendLock.Dispose();
