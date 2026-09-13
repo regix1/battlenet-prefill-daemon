@@ -1,9 +1,12 @@
-﻿namespace BattleNetPrefill.Web
+﻿#nullable enable
+
+namespace BattleNetPrefill.Web
 {
     public sealed class CdnRequestManager : IDisposable
     {
         private readonly HttpClient _client;
         private readonly IAnsiConsole _ansiConsole;
+        private readonly PrefillSettings _settings;
 
         /// <summary>
         /// Socket progress sink. Receives the up-front total + a "preparing" state before the transfer
@@ -121,8 +124,18 @@
         #endregion
 
         public CdnRequestManager(IAnsiConsole ansiConsole, IPrefillProgress? progress = null, string? progressAppId = null, string? progressAppName = null)
-            : this(ansiConsole, new HttpClient { Timeout = HeaderTimeout }, progress, progressAppId, progressAppName)
+            : this(ansiConsole, AppConfig.Capture(), progress ?? NullProgress.Instance, progressAppId, progressAppName)
         {
+        }
+
+        [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope",
+            Justification = "The manager owns the HTTP client and disposes it with the product.")]
+        internal CdnRequestManager(IAnsiConsole ansiConsole, PrefillSettings settings,
+            IPrefillProgress progress, string? progressAppId = null, string? progressAppName = null)
+            : this(ansiConsole, settings.CreateClient?.Invoke() ?? new HttpClient { Timeout = HeaderTimeout },
+                progress, progressAppId, progressAppName, settings)
+        {
+            _lancacheAddress = settings.LancacheAddress ?? string.Empty;
         }
 
         internal CdnRequestManager(
@@ -146,13 +159,15 @@
             HttpClient client,
             IPrefillProgress? progress,
             string? progressAppId,
-            string? progressAppName)
+            string? progressAppName,
+            PrefillSettings? settings = null)
         {
             _ansiConsole = ansiConsole;
             _client = client ?? throw new ArgumentNullException(nameof(client));
             _progress = progress ?? NullProgress.Instance;
             _progressAppId = progressAppId ?? string.Empty;
             _progressAppName = progressAppName ?? string.Empty;
+            _settings = settings ?? AppConfig.Capture();
         }
 
         /// <summary>
@@ -173,9 +188,12 @@
             }
 
             _productBasePath = entries[0].path;
-            _lancacheAddress = await LancacheIpResolver
-                .ResolveLancacheIpAsync(_ansiConsole, _currentCdn)
-                .WaitAsync(cancellationToken);
+            if (string.IsNullOrEmpty(_lancacheAddress))
+            {
+                _lancacheAddress = await LancacheIpResolver
+                    .ResolveLancacheIpAsync(_ansiConsole, _currentCdn)
+                    .WaitAsync(cancellationToken);
+            }
         }
 
         #region Queued Request Handling
@@ -199,12 +217,12 @@
             _queuedRequests.Clear();
 
             ByteSize totalDownloadSize = coalescedRequests.SumTotalBytes();
-            prefillSummaryResult.TotalBytesTransferred += totalDownloadSize;
 
             _ansiConsole.LogMarkupVerbose($"Downloading {Magenta(totalDownloadSize.ToDecimalString())} from {LightYellow(coalescedRequests.Count)} queued requests");
 
-            if (AppConfig.SkipDownloads)
+            if (_settings.SkipDownloads)
             {
+                prefillSummaryResult.TotalBytesTransferred += totalDownloadSize;
                 // Size-only pass (metadata estimate): NEVER emit download progress here — the socket UI must not
                 // see byte progress for the SkipDownloads estimate. Only a real prefill emits to _progress.
                 //TODO not a fan of writing it like this just so that the comparison logic keeps working
@@ -242,41 +260,58 @@
             var downloadTimer = Stopwatch.StartNew();
             var failedRequests = new ConcurrentBag<Request>();
             var anyRequestSucceeded = false;
-            await _ansiConsole.CreateSpectreProgress(AppConfig.TransferSpeedUnit).StartAsync(async ctx =>
+            try
             {
-                //TODO can probably cleanup this attempt 3 times logic since there is the polly stuff in place now.
-                // Run the initial download
-                var attemptedCount = coalescedRequests.Count;
-                failedRequests = await AttemptDownloadAsync(ctx, "Downloading..", coalescedRequests, downloadTimer, cancellationToken);
-                anyRequestSucceeded |= failedRequests.Count < attemptedCount;
-
-                // Handle any failed requests.  Each attempt moves _currentCdn to the next host, so the limit is
-                // the number of hosts to try, not a plain retry count.  Two retries walks all three entries
-                // _cdnList starts with; going further would index past the end when the CDN response adds none.
-                // An attempt that abandons its queue still comes back here, so a dead host does not stop the
-                // next one from being tried.
-                while (failedRequests.Any() && _retryCount < 2)
+                await _ansiConsole.CreateSpectreProgress(AppConfig.TransferSpeedUnit).StartAsync(async ctx =>
                 {
-                    _retryCount++;
-                    attemptedCount = failedRequests.Count;
-                    failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {_retryCount}..", failedRequests.ToList(), downloadTimer, cancellationToken);
+                    //TODO can probably cleanup this attempt 3 times logic since there is the polly stuff in place now.
+                    // Run the initial download
+                    var attemptedCount = coalescedRequests.Count;
+                    failedRequests = await AttemptDownloadAsync(ctx, "Downloading..", coalescedRequests, downloadTimer, cancellationToken);
                     anyRequestSucceeded |= failedRequests.Count < attemptedCount;
-                    await Task.Delay(2000 * _retryCount, cancellationToken);
-                }
-            });
+
+                    // Handle any failed requests.  Each attempt moves _currentCdn to the next host, so the limit is
+                    // the number of hosts to try, not a plain retry count.  Two retries walks all three entries
+                    // _cdnList starts with; going further would index past the end when the CDN response adds none.
+                    // An attempt that abandons its queue still comes back here, so a dead host does not stop the
+                    // next one from being tried.
+                    while (failedRequests.Any() && _retryCount < 2)
+                    {
+                        _retryCount++;
+                        attemptedCount = failedRequests.Count;
+                        failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {_retryCount}..", failedRequests.ToList(), downloadTimer, cancellationToken);
+                        anyRequestSucceeded |= failedRequests.Count < attemptedCount;
+                        await Task.Delay(2000 * _retryCount, cancellationToken);
+                    }
+                });
+            }
+            finally
+            {
+                var actualBytes = Interlocked.Read(ref _progressBytesDownloaded);
+                prefillSummaryResult.TotalBytesTransferred += ByteSize.FromBytes(actualBytes);
+                _progress.OnDownloadProgress(new DownloadProgressInfo
+                {
+                    AppId = _progressAppId,
+                    AppName = _progressAppName,
+                    TotalBytes = totalDownloadBytes,
+                    BytesDownloaded = actualBytes,
+                    Elapsed = downloadTimer.Elapsed
+                });
+            }
 
             // Final 100% report so the UI lands on full completion (only when nothing failed and not cancelled).
             if (!failedRequests.Any() && !cancellationToken.IsCancellationRequested)
             {
                 var finalElapsed = downloadTimer.Elapsed;
-                var finalRate = finalElapsed.TotalSeconds > 0 ? totalDownloadBytes / finalElapsed.TotalSeconds : 0;
+                var finalBytes = Interlocked.Read(ref _progressBytesDownloaded);
+                var finalRate = finalElapsed.TotalSeconds > 0 ? finalBytes / finalElapsed.TotalSeconds : 0;
                 _progress.OnDownloadProgress(new DownloadProgressInfo
                 {
                     State = "downloading",
                     AppId = _progressAppId,
                     AppName = _progressAppName,
                     TotalBytes = totalDownloadBytes,
-                    BytesDownloaded = totalDownloadBytes,
+                    BytesDownloaded = finalBytes,
                     BytesPerSecond = finalRate,
                     Elapsed = finalElapsed
                 });
@@ -284,7 +319,7 @@
 
             // Every host has been tried and not one request came back with data, so report the source as the
             // problem instead of printing a line per file and reporting the product as merely not updated.
-            if (!anyRequestSucceeded && failedRequests.Any())
+            if (!anyRequestSucceeded && failedRequests.Any() && Interlocked.Read(ref _progressBytesDownloaded) == 0)
             {
                 throw new TimeoutException(
                     $"Gave up downloading from {_lancacheAddress}.  Every request failed and not one byte arrived " +
@@ -367,7 +402,8 @@
                     failedRequests.Add(request);
                 }
 
-                if (Volatile.Read(ref succeededCount) == 0 && failedRequests.Count >= FailuresBeforeSourceIsDown)
+                if (Volatile.Read(ref succeededCount) == 0 && Interlocked.Read(ref _progressBytesDownloaded) == 0
+                    && failedRequests.Count >= FailuresBeforeSourceIsDown)
                 {
                     Volatile.Write(ref sourceIsDown, 1);
                 }
@@ -376,7 +412,7 @@
 
                 // Emit throttled live byte progress to the socket UI (mirrors epic-prefill DownloadHandler).
                 // Skip emitting once cancellation is requested so we don't race the terminal state.
-                var downloaded = Interlocked.Add(ref _progressBytesDownloaded, request.TotalBytes);
+                var downloaded = Interlocked.Read(ref _progressBytesDownloaded);
                 if (ct.IsCancellationRequested)
                 {
                     return;
@@ -444,10 +480,15 @@
                 uri = new Uri($"http://{_lancacheAddress}/{request.Uri}?nocache=1");
             }
 
-            // Try to return a cached copy from the disk first, before making an actual request
-            if (!AppConfig.NoLocalCache)
+            var outputFilePath = _settings.CacheDirectory + uri.AbsolutePath;
+            if (!request.DownloadWholeFile)
             {
-                string outputFilePath = AppConfig.CacheDir + uri.AbsolutePath;
+                outputFilePath += $".{request.LowerByteRange}-{request.UpperByteRange}";
+            }
+            using var cacheLease = await CacheLease.AcquireAsync(outputFilePath, cancellationToken);
+            // The cache claim covers the read, HTTP body, and replacement as one transaction.
+            if (!_settings.NoLocalCache)
+            {
                 if (File.Exists(outputFilePath))
                 {
                     return await File.ReadAllBytesAsync(outputFilePath, cancellationToken);
@@ -462,6 +503,7 @@
             }
 
             byte[] byteArray;
+            using var permit = await _settings.Budget.AcquireAsync(_settings.OperationId, _settings.MaxConcurrency, cancellationToken);
             using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             requestCancellation.CancelAfter(SingleRequestTimeout);
             try
@@ -483,15 +525,13 @@
             }
 
             // Prevents the response from being cached to disk when --no-cache is specified
-            if (AppConfig.NoLocalCache)
+            if (_settings.NoLocalCache)
             {
                 return await Task.FromResult(byteArray);
             }
 
             // Cache to disk
-            FileInfo file = new FileInfo(AppConfig.CacheDir + uri.AbsolutePath);
-            file.Directory.Create();
-            await File.WriteAllBytesAsync(file.FullName, byteArray, cancellationToken);
+            await CommitAsync(outputFilePath, byteArray, _settings.CommitFile, cancellationToken);
 
             return await Task.FromResult(byteArray);
         }
@@ -517,6 +557,7 @@
                 requestMessage.Headers.Range = new RangeHeaderValue(request.LowerByteRange, request.UpperByteRange);
             }
 
+            using var permit = await _settings.Budget.AcquireAsync(_settings.OperationId, _settings.MaxConcurrency, cancellationToken);
             using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             requestCancellation.CancelAfter(ResponseBodyTimeout);
             try
@@ -530,11 +571,19 @@
 
                 // Don't save the data anywhere, so we don't have to waste time writing it to disk.
                 var buffer = new byte[4096];
-                while (await responseStream.ReadAsync(buffer, requestCancellation.Token) != 0)
+                long received = 0;
+                int read;
+                while ((read = await responseStream.ReadAsync(buffer, requestCancellation.Token)) != 0)
                 {
+                    received += read;
+                    Interlocked.Add(ref _progressBytesDownloaded, read);
                     // Push the deadline out on every chunk that arrives, so this bounds a transfer that has gone
                     // quiet without capping how long a large but healthy transfer is allowed to take.
                     requestCancellation.CancelAfter(ResponseBodyTimeout);
+                }
+                if (!request.DownloadWholeFile && received != request.TotalBytes)
+                {
+                    throw new HttpRequestException("The content response did not match the requested byte range.");
                 }
             }
             catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
@@ -554,18 +603,22 @@
             PatchRequest endpoint,
             CancellationToken cancellationToken = default)
         {
-            var cacheFile = $"{AppConfig.CacheDir}/{endpoint.Name}-{tactProduct.ProductCode}.txt";
+            var cacheFile = $"{_settings.CacheDirectory}/{endpoint.Name}-{tactProduct.ProductCode}.txt";
+            using var cacheLease = await CacheLease.AcquireAsync(cacheFile, cancellationToken);
 
             // Load cached version, only valid for 30 minutes so that updated versions don't get accidentally ignored
-            if (!AppConfig.NoLocalCache && File.Exists(cacheFile) && DateTime.Now < File.GetLastWriteTime(cacheFile).AddMinutes(30))
+            if (!_settings.NoLocalCache && File.Exists(cacheFile) && DateTime.Now < File.GetLastWriteTime(cacheFile).AddMinutes(30))
             {
                 return await File.ReadAllTextAsync(cacheFile, cancellationToken);
             }
 
+            using var permit = await _settings.Budget.AcquireAsync(_settings.OperationId, _settings.MaxConcurrency, cancellationToken);
+            using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestCancellation.CancelAfter(ResponseBodyTimeout);
             using HttpResponseMessage response = await _client.GetAsync(
                 new Uri($"{AppConfig.BattleNetPatchUri}{tactProduct.ProductCode}/{endpoint.Name}"),
                 HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
+                requestCancellation.Token);
             if (!response.IsSuccessStatusCode)
             {
                 throw new Exception("Error during retrieving HTTP cdns: Received bad HTTP code " + response.StatusCode);
@@ -574,9 +627,9 @@
             string content;
             try
             {
-                content = await res.ReadAsStringAsync(cancellationToken).WaitAsync(ResponseBodyTimeout, cancellationToken);
+                content = await res.ReadAsStringAsync(requestCancellation.Token);
             }
-            catch (TimeoutException exception)
+            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new HttpRequestException(
                     $"Timed out reading the reply from the Battle.net patch service at {AppConfig.BattleNetPatchUri}. " +
@@ -584,14 +637,100 @@
                     exception);
             }
 
-            if (AppConfig.NoLocalCache)
+            if (_settings.NoLocalCache)
             {
                 return content;
             }
 
             // Writes results to disk, to be used as cache later
-            await File.WriteAllTextAsync(cacheFile, content, cancellationToken);
+            await CommitAsync(cacheFile, Encoding.UTF8.GetBytes(content), _settings.CommitFile, cancellationToken);
             return content;
+        }
+
+        internal static async Task CommitAsync(string path, byte[] bytes, Action<string, string>? commit,
+            CancellationToken cancellationToken)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
+                {
+                    await stream.WriteAsync(bytes, cancellationToken);
+                    await stream.FlushAsync(cancellationToken);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (commit == null)
+                {
+                    File.Move(temporary, path, overwrite: true);
+                }
+                else
+                {
+                    commit(temporary, path);
+                }
+            }
+            finally
+            {
+                if (File.Exists(temporary))
+                {
+                    File.Delete(temporary);
+                }
+            }
+        }
+
+        private sealed class CacheLease : IDisposable
+        {
+            private static readonly Dictionary<string, CacheLease> _leases = new(
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            private readonly string _path;
+            private readonly SemaphoreSlim _gate = new(1, 1);
+            private int _references;
+
+            private CacheLease(string path) => _path = path;
+
+            public static async Task<CacheLease> AcquireAsync(string path, CancellationToken cancellationToken)
+            {
+                path = Path.GetFullPath(path);
+                CacheLease lease;
+                lock (_leases)
+                {
+                    if (!_leases.TryGetValue(path, out lease!))
+                    {
+                        lease = new CacheLease(path);
+                        _leases.Add(path, lease);
+                    }
+                    lease._references++;
+                }
+                try
+                {
+                    await lease._gate.WaitAsync(cancellationToken);
+                    return lease;
+                }
+                catch (OperationCanceledException)
+                {
+                    lease.ReleaseReference();
+                    throw;
+                }
+            }
+
+            public void Dispose()
+            {
+                _gate.Release();
+                ReleaseReference();
+            }
+
+            private void ReleaseReference()
+            {
+                lock (_leases)
+                {
+                    if (--_references == 0)
+                    {
+                        _leases.Remove(_path);
+                        _gate.Dispose();
+                    }
+                }
+            }
         }
 
         public void Dispose()

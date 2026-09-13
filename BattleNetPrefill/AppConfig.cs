@@ -2,6 +2,18 @@
 {
     public static class AppConfig
     {
+        private static readonly Lazy<PrefillProtocol> _protocol = new(() => PrefillProtocol.FromEnvironment(25));
+        private static readonly Lazy<RequestBudget> _requestBudget = new(() => new RequestBudget(Protocol.MaxConcurrentRequests));
+        public static PrefillProtocol Protocol => _protocol.Value;
+        internal static RequestBudget RequestBudget => _requestBudget.Value;
+        internal static PrefillSettings Capture() => new()
+        {
+            Budget = RequestBudget,
+            OperationId = Guid.NewGuid().ToString("D"),
+            MaxConcurrency = Protocol.MaxConcurrentRequests,
+            SkipDownloads = SkipDownloads,
+            NoLocalCache = NoLocalCache
+        };
         static AppConfig()
         {
             // Create required folders

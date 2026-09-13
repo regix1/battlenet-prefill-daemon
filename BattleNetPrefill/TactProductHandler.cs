@@ -1,18 +1,27 @@
-﻿namespace BattleNetPrefill
+﻿#nullable enable
+
+namespace BattleNetPrefill
 {
     public sealed class TactProductHandler
     {
         private readonly IAnsiConsole _ansiConsole;
         private readonly bool _forcePrefill;
         private readonly IPrefillProgress _progress;
+        private readonly PrefillSettings _settings;
 
         private readonly PrefillSummaryResult _prefillSummaryResult = new PrefillSummaryResult();
 
         public TactProductHandler(IAnsiConsole ansiConsole, bool forcePrefill = false, IPrefillProgress? progress = null)
+            : this(ansiConsole, forcePrefill, progress ?? NullProgress.Instance, AppConfig.Capture())
+        {
+        }
+
+        internal TactProductHandler(IAnsiConsole ansiConsole, bool forcePrefill, IPrefillProgress progress, PrefillSettings settings)
         {
             _ansiConsole = ansiConsole;
             _forcePrefill = forcePrefill;
             _progress = progress ?? NullProgress.Instance;
+            _settings = settings;
         }
 
         /// <summary>
@@ -21,31 +30,15 @@
         /// </summary>
         public PrefillSummaryResult Summary => _prefillSummaryResult;
 
-        /// <summary>
-        /// Computes the download size (in bytes) for a single product without transferring any data.
-        /// Runs the exact same metadata pass as <see cref="ProcessProductAsync"/> with
-        /// <see cref="AppConfig.SkipDownloads"/> forced on, so the full byte-range queue is built and
-        /// coalesced (and summed into <see cref="PrefillSummaryResult.TotalBytesTransferred"/>) but no
-        /// bytes are downloaded. Returns the remaining-to-download size for the product; an up-to-date
-        /// product reports 0. <see cref="AppConfig.SkipDownloads"/> is always restored.
-        /// </summary>
+        // A separate handler owns the size estimate; process defaults remain unchanged.
         public async Task<long> GetProductDownloadSizeAsync(
             TactProduct product,
             CancellationToken cancellationToken = default)
         {
-            var previousSkipDownloads = AppConfig.SkipDownloads;
-            var bytesBefore = _prefillSummaryResult.TotalBytesTransferred;
-            AppConfig.SkipDownloads = true;
-            try
-            {
-                await ProcessProductAsync(product, cancellationToken);
-                var delta = _prefillSummaryResult.TotalBytesTransferred - bytesBefore;
-                return (long)delta.Bytes;
-            }
-            finally
-            {
-                AppConfig.SkipDownloads = previousSkipDownloads;
-            }
+            var handler = new TactProductHandler(_ansiConsole, _forcePrefill, NullProgress.Instance,
+                _settings with { SkipDownloads = true });
+            await handler.ProcessProductAsync(product, cancellationToken);
+            return (long)handler.Summary.TotalBytesTransferred.Bytes;
         }
 
         public async Task ProcessMultipleProductsAsync(
@@ -82,15 +75,15 @@
         /// <summary>
         /// Downloads a specified game, in the same manner that Battle.net does.  Should be used to pre-fill a LanCache with game data from Blizzard's CDN.
         /// </summary>
-        public async Task<ComparisonResult> ProcessProductAsync(TactProduct product, CancellationToken cancellationToken = default)
+        public async Task<ComparisonResult?> ProcessProductAsync(TactProduct product, CancellationToken cancellationToken = default)
         {
             var metadataTimer = Stopwatch.StartNew();
 
             // Initializing classes, now that we have our CDN info loaded.
             // The size-only pass (AppConfig.SkipDownloads) uses NullProgress so no download progress is emitted;
             // a real prefill passes the live socket sink + app identity so the UI gets preparing/byte progress.
-            var progressSink = AppConfig.SkipDownloads ? NullProgress.Instance : _progress;
-            using var cdnRequestManager = new CdnRequestManager(_ansiConsole, progressSink, product.ProductCode, product.DisplayName);
+            var progressSink = _settings.SkipDownloads ? NullProgress.Instance : _progress;
+            using var cdnRequestManager = new CdnRequestManager(_ansiConsole, _settings, progressSink, product.ProductCode, product.DisplayName);
             var downloadFileHandler = new DownloadFileHandler(cdnRequestManager);
             var configFileHandler = new ConfigFileHandler(cdnRequestManager);
             var installFileHandler = new InstallFileHandler(cdnRequestManager);
@@ -156,14 +149,31 @@
             {
                 return await ComparisonUtil.CompareAgainstRealRequestsAsync(cdnRequestManager.allRequestsMade.ToList(), product);
             }
-            if (AppConfig.SkipDownloads)
+            if (_settings.SkipDownloads)
             {
                 return null;
             }
 
             if (downloadSuccessful)
             {
-                MarkDownloadAsSuccessful(product, targetVersion.Value);
+                if (_settings.BeforeCommit != null) { await _settings.BeforeCommit(cancellationToken); }
+                cancellationToken.ThrowIfCancellationRequested();
+                var versionFilePath = $"{_settings.CacheDirectory}/prefilledVersion-{product.ProductCode}.txt";
+                await CdnRequestManager.CommitAsync(versionFilePath, Encoding.UTF8.GetBytes(targetVersion.Value.versionsName),
+                    (temporary, target) =>
+                    {
+                        void Commit()
+                        {
+                            if (_settings.CommitFile != null) { _settings.CommitFile(temporary, target); }
+                            else { File.Move(temporary, target, overwrite: true); }
+                        }
+                        if (_settings.Run == null) { Commit(); }
+                        else
+                        {
+                            _settings.Run.Commit(new AppDownloadInfo { AppId = product.ProductCode, Name = product.DisplayName },
+                                Commit, cancellationToken);
+                        }
+                    }, cancellationToken);
                 _prefillSummaryResult.Updated++;
             }
             else
@@ -181,7 +191,7 @@
         private bool IsProductUpToDate(TactProduct product, VersionsEntry latestVersion)
         {
             // Checking to see if a file has been previously prefilled
-            var versionFilePath = $"{AppConfig.CacheDir}/prefilledVersion-{product.ProductCode}.txt";
+            var versionFilePath = $"{_settings.CacheDirectory}/prefilledVersion-{product.ProductCode}.txt";
             if (!File.Exists(versionFilePath))
             {
                 return false;
@@ -192,11 +202,6 @@
             return latestVersion.versionsName == lastPrefilledVersion;
         }
 
-        private void MarkDownloadAsSuccessful(TactProduct product, VersionsEntry latestVersion)
-        {
-            var versionFilePath = $"{AppConfig.CacheDir}/prefilledVersion-{product.ProductCode}.txt";
-            File.WriteAllText(versionFilePath, latestVersion.versionsName);
-        }
 
         #region Select Apps
 
@@ -217,7 +222,8 @@
                 return new List<TactProduct>();
             }
 
-            return JsonSerializer.Deserialize(File.ReadAllText(AppConfig.UserSelectedAppsPath), SerializationContext.Default.ListString)
+            return (JsonSerializer.Deserialize(File.ReadAllText(AppConfig.UserSelectedAppsPath), SerializationContext.Default.ListString)
+                    ?? throw new InvalidDataException("Selected products must be a JSON array."))
                                  .Select(e => TactProduct.Parse(e))
                                  .ToList();
         }

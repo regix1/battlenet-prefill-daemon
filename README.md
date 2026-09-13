@@ -58,6 +58,21 @@ No login required — content is public, so you can prefill straight away.
 - No account needed — content is public.
 - Docker, or the [.NET 8 SDK](https://dotnet.microsoft.com/) to build from source.
 
+## Concurrent runs
+
+The anonymous daemon accepts independent prefill runs in one process. Each run
+processes its products in order; different runs may transfer disjoint products
+concurrently. No account session or additional container is created.
+
+`PREFILL_MAX_RUNS` defaults to `4` and accepts `1` through `16`.
+`PREFILL_MAX_REQUESTS` defaults to `25` and independently caps all content
+requests in the process. These values are read at startup, so a change requires
+a restart. Use a run limit of `1` as the conservative fallback.
+
+Managers that do not negotiate the complete protocol-v2 feature set use the
+legacy exclusive single-run behavior. Existing selection, status, and cancel
+commands remain available during mixed-version rollout.
+
 ## Support
 
 Questions or issues? [Open an issue](https://github.com/regix1/battlenet-prefill-daemon/issues),

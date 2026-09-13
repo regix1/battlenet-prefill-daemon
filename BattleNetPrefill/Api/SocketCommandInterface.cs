@@ -18,13 +18,16 @@ public sealed class SocketCommandInterface : IDisposable
     private readonly SocketServer _socketServer;
     private readonly SocketProgress _progress;
     private readonly CancellationTokenSource _cts = new();
-    private readonly OwnedOperationCoordinator _prefillOperation = new();
+    private readonly OwnedOperationCoordinator _prefillOperation;
+    private readonly PrefillProtocol _protocol;
     private readonly BattleNetPrefillApi _api;
     private readonly Func<PrefillOptions, CancellationToken, Task<PrefillResult>> _prefillAsync;
     private bool _disposed;
 
     public SocketCommandInterface(string socketPath)
     {
+        _protocol = AppConfig.Protocol;
+        _prefillOperation = new OwnedOperationCoordinator(_protocol.MaxConcurrentRuns);
         _progress = new SocketProgress();
         _socketServer = new SocketServer(socketPath, _progress);
         _api = new BattleNetPrefillApi(_progress);
@@ -35,10 +38,17 @@ public sealed class SocketCommandInterface : IDisposable
     }
 
     public SocketCommandInterface(int tcpPort)
+        : this(tcpPort, AppConfig.Protocol, AppConfig.Capture())
     {
+    }
+
+    internal SocketCommandInterface(int tcpPort, PrefillProtocol protocol, PrefillSettings settings)
+    {
+        _protocol = protocol;
+        _prefillOperation = new OwnedOperationCoordinator(protocol.MaxConcurrentRuns);
         _progress = new SocketProgress();
         _socketServer = new SocketServer(tcpPort, _progress);
-        _api = new BattleNetPrefillApi(_progress);
+        _api = new BattleNetPrefillApi(_progress, settings);
         _prefillAsync = _api.PrefillAsync;
         _socketServer.OnCommand = HandleCommandAsync;
 
@@ -70,8 +80,8 @@ public sealed class SocketCommandInterface : IDisposable
 
     public async Task StopAsync()
     {
-        _cts.Cancel();
-        await _prefillOperation.CancelAndWaitAsync();
+        await _cts.CancelAsync();
+        await _prefillOperation.CancelAllAndWaitAsync();
         await _socketServer.StopAsync();
         _progress.OnLog(LogLevel.Info, "Socket command interface stopped");
     }
@@ -82,10 +92,16 @@ public sealed class SocketCommandInterface : IDisposable
 
         try
         {
+            if (request.Type.Equals("shutdown", StringComparison.OrdinalIgnoreCase))
+            {
+                await _cts.CancelAsync();
+                await _prefillOperation.CancelAllAndWaitAsync(CancellationToken.None);
+            }
             return request.Type.ToLowerInvariant() switch
             {
                 "cancel-prefill" => await HandleCancelPrefillAsync(request, cancellationToken),
                 "status" => HandleStatus(request),
+                "get-operation" => HandleGetOperation(request),
                 "get-owned-games" => await HandleGetOwnedGamesAsync(request, cancellationToken),
                 "get-selected-apps" => HandleGetSelectedApps(request),
                 "set-selected-apps" => HandleSetSelectedApps(request),
@@ -125,16 +141,42 @@ public sealed class SocketCommandInterface : IDisposable
         CommandRequest request,
         CancellationToken cancellationToken)
     {
+        if (request.Parameters?.TryGetValue("operationId", out var operationId) == true)
+        {
+            var instance = request.Parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty;
+            _protocol.ValidateInstance(instance);
+            var operation = Cancel(operationId);
+            return new CommandResponse
+            {
+                Id = request.Id,
+                Success = operation != null,
+                Data = operation,
+                Error = operation == null ? "operation-not-found" : null
+            };
+        }
         if (!_prefillOperation.IsRunning)
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = true, Message = "No prefill in progress", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = true,
+                Message = "No prefill in progress",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
         _progress.OnLog(LogLevel.Info, "Cancelling prefill...");
-        var result = await _prefillOperation.CancelAndWaitAsync(cancellationToken);
+        var active = _prefillOperation.GetActiveOperations();
+        OwnedOperationResult result;
+        if (active.Count == 1)
+        {
+            Cancel(active[0].OperationId);
+            result = await _prefillOperation.WaitAsync(active[0].OperationId, cancellationToken);
+        }
+        else
+        {
+            result = await _prefillOperation.CancelAndWaitAsync(cancellationToken);
+        }
         if (result.Status == OwnedOperationStatus.Failed)
         {
             return new CommandResponse
@@ -176,10 +218,57 @@ public sealed class SocketCommandInterface : IDisposable
             Data = new StatusData
             {
                 IsLoggedIn = true,
-                IsInitialized = _api.IsInitialized
+                IsInitialized = _api.IsInitialized,
+                DaemonInstanceId = _protocol.DaemonInstanceId,
+                MaxConcurrentRuns = _protocol.MaxConcurrentRuns,
+                MaxConcurrentRequests = _protocol.MaxConcurrentRequests,
+                ActiveOperations = _prefillOperation.GetActiveOperations(),
+                RecentOperations = _prefillOperation.GetRecentOperations()
             },
             CompletedAt = DateTime.UtcNow
         };
+    }
+
+    private CommandResponse HandleGetOperation(CommandRequest request)
+    {
+        var parameters = request.Parameters ?? throw new ArgumentException("Operation parameters are required.");
+        _protocol.ValidateInstance(parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty);
+        var id = parameters.GetValueOrDefault("operationId") ?? throw new ArgumentException("operationId is required.");
+        var offset = parameters.TryGetValue("offset", out var offsetText) ? int.Parse(offsetText, System.Globalization.CultureInfo.InvariantCulture) : 0;
+        var limit = parameters.TryGetValue("limit", out var limitText) ? int.Parse(limitText, System.Globalization.CultureInfo.InvariantCulture) : 100;
+        var page = _prefillOperation.GetOperation(id, offset, limit);
+        return new CommandResponse { Id = request.Id, Success = page != null, Data = page, Error = page == null ? "operation-not-found" : null };
+    }
+
+    private Task PublishAsync(RunSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        var item = snapshot.CurrentItem;
+        var terminal = snapshot.State is "completed" or "failed" or "cancelled";
+        var update = new PrefillProgressUpdate
+        {
+            OperationId = snapshot.OperationId,
+            DaemonInstanceId = snapshot.DaemonInstanceId,
+            Sequence = snapshot.Sequence,
+            Operation = snapshot,
+            State = terminal || snapshot.State == "cancelling" ? snapshot.State
+                : item?.Result != null ? "app_completed" : item?.State ?? "preparing",
+            CurrentAppId = item?.AppId,
+            CurrentAppName = item?.Name,
+            Result = item?.Result,
+            Reason = terminal ? snapshot.Reason : item?.Reason,
+            BytesDownloaded = item?.BytesTransferred ?? 0,
+            TotalBytes = item?.TotalBytes ?? 0,
+            TotalBytesTransferred = snapshot.BytesTransferred,
+            TotalApps = snapshot.TotalApps,
+            UpdatedApps = snapshot.CompletedApps,
+            AlreadyUpToDate = snapshot.CachedApps,
+            FailedApps = snapshot.FailedApps,
+            SkippedApps = snapshot.SkippedApps,
+            CancelledApps = snapshot.CancelledApps,
+            UpdatedAt = snapshot.UpdatedAt.UtcDateTime,
+            TotalTime = snapshot.UpdatedAt - snapshot.StartedAt
+        };
+        return _socketServer.BroadcastProgressAsync(new ProgressEvent(update), cancellationToken);
     }
 
     private async Task<CommandResponse> HandleGetOwnedGamesAsync(CommandRequest request, CancellationToken cancellationToken)
@@ -188,7 +277,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Data = games, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Data = games,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -198,7 +290,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Data = selected, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Data = selected,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -209,7 +304,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "appIds parameter required", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "appIds parameter required",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -218,7 +316,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "appIds must be a JSON array", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "appIds must be a JSON array",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -228,7 +329,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Apps selected", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Apps selected",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -250,11 +354,61 @@ public sealed class SocketCommandInterface : IDisposable
         CommandRequest request,
         CancellationToken cancellationToken)
     {
+        if (request.Parameters?.ContainsKey("protocolVersion") == true)
+        {
+            if (request.Parameters["protocolVersion"] != "2")
+                throw new ArgumentException("Unsupported protocolVersion.");
+            _protocol.ValidateInstance(request.Parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty);
+            if (!_api.IsInitialized) { throw new InvalidOperationException("Daemon is not ready."); }
+            if (!Guid.TryParse(request.Id, out _)) { throw new ArgumentException("operationId must be a GUID."); }
+            var selection = request.Parameters.GetValueOrDefault("selection") ?? "selected";
+            if (bool.TryParse(request.Parameters.GetValueOrDefault("all"), out var all) && all) { selection = "all"; }
+            if (selection is not ("selected" or "all")) { throw new ArgumentException("Unsupported selection preset."); }
+            IReadOnlyList<string>? ids = null;
+            if (request.Parameters.TryGetValue("appIds", out var json))
+            {
+                var requested = JsonSerializer.Deserialize(json, DaemonSerializationContext.Default.ListString)
+                    ?? throw new ArgumentException("appIds must be a JSON array.");
+                ids = requested.Select(id => BattleNetPrefillApi.ResolveProduct(id)?.ProductCode
+                    ?? throw new ArgumentException("Unknown Battle.net product.")).ToArray();
+            }
+            var maximum = _protocol.MaxConcurrentRequests;
+            if (request.Parameters.TryGetValue("maxConcurrency", out var maximumText)
+                && !int.TryParse(maximumText, out maximum))
+                throw new ArgumentException("Invalid maxConcurrency.");
+            var force = false;
+            if (request.Parameters.TryGetValue("force", out var forceText) && !bool.TryParse(forceText, out force))
+                throw new ArgumentException("Invalid force.");
+            var captured = _protocol.Capture(new RunOptions
+            {
+                AppIds = ids,
+                Selection = selection,
+                Force = force,
+                MaxConcurrency = maximum
+            });
+            var run = new PrefillRun(request.Id, _protocol, captured, _progress, PublishAsync);
+            cancellationToken.ThrowIfCancellationRequested();
+            var admission = await _prefillOperation.StartAsync(request.Id, PrefillProtocol.Fingerprint(captured),
+                run.Progress, token => run.ExecuteAsync(_api, token), _cts.Token);
+            return new CommandResponse
+            {
+                Id = request.Id,
+                Success = admission.Accepted,
+                Error = admission.Error,
+                Data = admission.Accepted
+                    ? new PrefillStart(true, request.Id, _protocol.DaemonInstanceId,
+                        admission.Replayed ? admission.Operation!.State : "started")
+                    : null
+            };
+        }
         if (_prefillOperation.IsRunning || _api.IsPrefilling)
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "A prefill is already in progress", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "A prefill is already in progress",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -312,17 +466,25 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Prefill started", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Prefill started",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
     private CommandResponse HandleClearCache(CommandRequest request)
     {
+        if (_prefillOperation.IsRunning) { throw new InvalidOperationException("run-limit"); }
         var result = BattleNetPrefillApi.ClearCache();
 
         return new CommandResponse
         {
-            Id = request.Id, Success = result.Success, Data = result, Message = result.Message, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = result.Success,
+            Data = result,
+            Message = result.Message,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -332,7 +494,11 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = info.Success, Data = info, Message = info.Message, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = info.Success,
+            Data = info,
+            Message = info.Message,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -374,7 +540,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Shutdown complete", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Shutdown complete",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -383,6 +552,9 @@ public sealed class SocketCommandInterface : IDisposable
         var statusEvent = new AuthStateEvent(status, message, displayName);
         await _socketServer.BroadcastAuthStateAsync(statusEvent);
     }
+
+    private RunSnapshot? Cancel(string operationId)
+        => _prefillOperation.Cancel(operationId, _protocol.DaemonInstanceId);
 
     public void Dispose()
     {
@@ -522,7 +694,7 @@ public sealed class SocketCommandInterface : IDisposable
             OnLog(LogLevel.Info, $"Prefill complete: {summary.UpdatedApps} updated, {summary.AlreadyUpToDate} up-to-date, {summary.FailedApps} failed");
             BroadcastProgress(new PrefillProgressUpdate
             {
-                State = "completed",
+                State = summary.FailedApps > 0 ? "failed" : "completed",
                 TotalApps = summary.TotalApps,
                 UpdatedApps = summary.UpdatedApps,
                 AlreadyUpToDate = summary.AlreadyUpToDate,

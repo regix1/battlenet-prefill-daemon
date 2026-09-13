@@ -53,8 +53,9 @@ public sealed class CdnRequestManagerCancellationTests
             startBytes: 0,
             endBytes: 4095);
 
+        var summary = new PrefillSummaryResult();
         var download = manager.DownloadQueuedRequestsAsync(
-            new PrefillSummaryResult(),
+            summary,
             cancellation.Token);
 
         await responseStream.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -63,6 +64,7 @@ public sealed class CdnRequestManagerCancellationTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => download.WaitAsync(TimeSpan.FromSeconds(2)));
         await responseStream.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(0, summary.TotalBytesTransferred.Bytes);
     }
 
     private static CdnRequestManager CreateManager(HttpClient httpClient)

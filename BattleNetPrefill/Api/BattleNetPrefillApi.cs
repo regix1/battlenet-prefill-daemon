@@ -28,19 +28,11 @@ public sealed class BattleNetPrefillApi : IDisposable
     private bool _isInitialized;
     private bool _isDisposed;
 
-    /// <summary>
-    /// True while <see cref="PrefillAsync"/> is actively running. The download-size estimate in
-    /// <see cref="GetSelectedAppsStatusAsync"/> toggles the process-global <see cref="AppConfig.SkipDownloads"/>
-    /// flag, which a concurrent live prefill reads to decide whether to transfer bytes. We must NEVER run that
-    /// metadata-only pass while a prefill is active, or the running prefill would silently skip all transfers
-    /// yet still write its success markers. Set/cleared via <see cref="Interlocked"/> for cross-thread visibility.
-    /// </summary>
-    private int _isPrefilling;
+    private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
+    private readonly ItemClaims _claims = new();
+    private readonly PrefillSettings _settings;
 
-    /// <summary>
-    /// Serializes the <see cref="AppConfig.SkipDownloads"/>-mutating size pass so two concurrent
-    /// <c>get-selected-apps-status</c> polls cannot clobber each other's save/restore of the global flag.
-    /// </summary>
+    // Size estimates share their own result cache.
     private readonly SemaphoreSlim _sizePassLock = new SemaphoreSlim(1, 1);
 
     /// <summary>
@@ -51,15 +43,18 @@ public sealed class BattleNetPrefillApi : IDisposable
     /// </summary>
     private readonly ConcurrentDictionary<string, long> _downloadSizeCache = new ConcurrentDictionary<string, long>();
 
-    /// <summary>
-    /// True while a prefill operation is running. Used to suppress the SkipDownloads-mutating size pass.
-    /// </summary>
-    public bool IsPrefilling => Volatile.Read(ref _isPrefilling) != 0;
+    public bool IsPrefilling => !_activeRuns.IsEmpty;
 
     public BattleNetPrefillApi(IPrefillProgress? progress = null)
+        : this(progress ?? NullProgress.Instance, AppConfig.Capture())
+    {
+    }
+
+    internal BattleNetPrefillApi(IPrefillProgress progress, PrefillSettings settings)
     {
         _progress = progress ?? NullProgress.Instance;
         _console = new ApiConsoleAdapter(_progress);
+        _settings = settings;
     }
 
     public bool IsInitialized => _isInitialized;
@@ -107,10 +102,10 @@ public sealed class BattleNetPrefillApi : IDisposable
         ThrowIfNotInitialized();
         ThrowIfDisposed();
 
-        if (_selectedAppsCache != null && _selectedAppsCache.Count > 0)
+        if (_selectedAppsCache != null)
         {
             _progress.OnLog(LogLevel.Info, $"GetSelectedApps: Returning {_selectedAppsCache.Count} cached apps");
-            return _selectedAppsCache;
+            return _selectedAppsCache.ToList();
         }
 
         var fileApps = TactProductHandler.LoadPreviouslySelectedApps()
@@ -231,30 +226,13 @@ public sealed class BattleNetPrefillApi : IDisposable
         };
     }
 
-    /// <summary>
-    /// Returns the per-product download-size estimate, using a version-keyed cache to avoid repeated CDN
-    /// round-trips and to shrink the race window around the global <see cref="AppConfig.SkipDownloads"/> flag.
-    ///
-    /// SAFETY: the actual size pass mutates <see cref="AppConfig.SkipDownloads"/> (a process-global static)
-    /// to suppress byte transfers. A concurrent live prefill reads that same flag, so we MUST NOT run the pass
-    /// while <see cref="IsPrefilling"/> is true — doing so would make the running prefill skip every transfer
-    /// yet still report success. When a prefill is active we return the cached value if we have one, else 0;
-    /// we never block the poll and never corrupt the running prefill. The pass itself is serialized behind
-    /// <see cref="_sizePassLock"/> so two concurrent polls cannot clobber the flag's save/restore.
-    /// </summary>
+    // Size-only handlers capture their own options and cannot disable another run.
     private async Task<long> GetCachedDownloadSizeAsync(TactProduct product, CancellationToken cancellationToken)
     {
         var cacheKey = BuildSizeCacheKey(product.ProductCode);
         if (_downloadSizeCache.TryGetValue(cacheKey, out var cachedSize))
         {
             return cachedSize;
-        }
-
-        // A prefill is running: never touch AppConfig.SkipDownloads. Return cached value if any, else 0.
-        if (IsPrefilling)
-        {
-            _progress.OnLog(LogLevel.Info, $"Prefill in progress - skipping size estimate for {product.DisplayName}");
-            return 0;
         }
 
         await _sizePassLock.WaitAsync(cancellationToken);
@@ -266,15 +244,11 @@ public sealed class BattleNetPrefillApi : IDisposable
             {
                 return cachedSize;
             }
-            if (IsPrefilling)
-            {
-                _progress.OnLog(LogLevel.Info, $"Prefill started - skipping size estimate for {product.DisplayName}");
-                return 0;
-            }
 
             try
             {
-                var handler = new TactProductHandler(_console);
+                var handler = new TactProductHandler(_console, false, NullProgress.Instance,
+                    _settings with { OperationId = Guid.NewGuid().ToString("D"), SkipDownloads = true });
                 var downloadSize = await handler.GetProductDownloadSizeAsync(product, cancellationToken);
                 _downloadSizeCache[cacheKey] = downloadSize;
                 return downloadSize;
@@ -310,7 +284,7 @@ public sealed class BattleNetPrefillApi : IDisposable
     /// updates the product, the marker version changes, so the next poll computes a fresh key and the stale
     /// entry is naturally never read again.
     /// </summary>
-    private static string BuildSizeCacheKey(string productCode)
+    private string BuildSizeCacheKey(string productCode)
     {
         var version = ReadPrefillMarker(productCode) ?? "none";
         return $"{productCode}@{version}";
@@ -319,122 +293,121 @@ public sealed class BattleNetPrefillApi : IDisposable
     /// <summary>
     /// Runs the prefill operation, emitting structured progress events per product.
     /// </summary>
-    public async Task<PrefillResult> PrefillAsync(
-        PrefillOptions? options = null,
-        CancellationToken cancellationToken = default)
+    public Task<PrefillResult> PrefillAsync(
+        PrefillOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        options ??= new PrefillOptions();
+        var ids = options.Products is { Count: > 0 }
+            ? options.Products.ToArray()
+            : options.DownloadAllOwnedGames
+                ? TactProduct.AllEnumValues.Select(product => product.ProductCode).ToArray()
+                : GetSelectedApps().ToArray();
+        return PrefillAsync(ids, options.Force, _progress,
+            _settings with { OperationId = Guid.NewGuid().ToString("D") }, null, cancellationToken);
+    }
+
+    internal Task<PrefillResult> PrefillAsync(PrefillRun run, CancellationToken cancellationToken)
+    {
+        var ids = run.Options.AppIds
+            ?? TactProduct.AllEnumValues.Select(product => product.ProductCode).ToArray();
+        if (!run.Progress.Snapshot.SelectionResolved)
+        {
+            run.Progress.ResolveSelection(ids);
+        }
+        return PrefillAsync(ids, run.Options.Force, run,
+            _settings with
+            {
+                OperationId = run.Progress.Snapshot.OperationId,
+                MaxConcurrency = run.Options.MaxConcurrency,
+                Run = run
+            }, run, cancellationToken);
+    }
+
+    private async Task<PrefillResult> PrefillAsync(IReadOnlyList<string> ids, bool force,
+        IPrefillProgress progress, PrefillSettings settings, PrefillRun? run,
+        CancellationToken cancellationToken)
     {
         ThrowIfNotInitialized();
         ThrowIfDisposed();
-
-        options ??= new PrefillOptions();
-
-        // Mark prefill active BEFORE any work so the SkipDownloads-mutating size pass in
-        // GetSelectedAppsStatusAsync bails out for the entire duration of this prefill.
-        Interlocked.Exchange(ref _isPrefilling, 1);
-        try
+        var products = ids.Select(id => ResolveProduct(id)
+            ?? throw new ArgumentException("Unknown Battle.net product.", nameof(ids))).Distinct().ToArray();
+        if (products.Length == 0)
         {
+            return new PrefillResult { Success = false, ErrorMessage = "No apps selected for prefill" };
+        }
 
-        _progress.OnOperationStarted("Prefill operation");
+        _activeRuns.TryAdd(settings.OperationId, 0);
         var timer = Stopwatch.StartNew();
-
-        // Resolve the set of products to prefill.
-        List<TactProduct> products;
-        if (options.Products is { Count: > 0 })
-        {
-            products = options.Products
-                .Select(ResolveProduct)
-                .Where(p => p != null)
-                .Select(p => p!)
-                .ToList();
-        }
-        else if (options.DownloadAllOwnedGames)
-        {
-            products = TactProduct.AllEnumValues.ToList();
-        }
-        else
-        {
-            products = TactProductHandler.LoadPreviouslySelectedApps();
-        }
-
-        products = products.Distinct().ToList();
-
-        if (products.Count == 0)
-        {
-            _progress.OnError("No apps selected for prefill. Select apps first or pass 'all'.");
-            return new PrefillResult
-            {
-                Success = false,
-                ErrorMessage = "No apps selected for prefill",
-                TotalTime = timer.Elapsed
-            };
-        }
-
-        var handler = new TactProductHandler(_console, forcePrefill: options.Force, progress: _progress);
-
+        var handler = new TactProductHandler(new ApiConsoleAdapter(progress), force, progress, settings);
         var updated = 0;
-        var alreadyUpToDate = 0;
+        var cached = 0;
         var failed = 0;
-
         try
         {
             foreach (var product in products)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
-                // Best-effort up-front total for the app-level "started" broadcast: reuse any size estimate a
-                // prior status poll already cached (version-keyed, read-only — does NOT touch AppConfig.SkipDownloads).
-                // The authoritative remaining-total is emitted by the handler's "preparing" progress once the
-                // request queue is coalesced; this just gives OnAppStarted a non-zero total when available.
-                var cachedTotal = _downloadSizeCache.TryGetValue(BuildSizeCacheKey(product.ProductCode), out var estTotal) ? estTotal : 0;
-                var appInfo = new AppDownloadInfo { AppId = product.ProductCode, Name = product.DisplayName, TotalBytes = cachedTotal };
-                _progress.OnAppStarted(appInfo);
-
-                var versionBefore = ReadPrefillMarker(product.ProductCode);
-
+                var app = new AppDownloadInfo { AppId = product.ProductCode, Name = product.DisplayName };
+                var claim = _claims.TryClaim(settings.OperationId, new[] { product.ProductCode });
+                progress.OnAppStarted(app);
+                if (claim == null)
+                {
+                    progress.OnAppCompleted(app, AppDownloadResult.Skipped);
+                    continue;
+                }
+                run?.Hold(claim);
                 try
                 {
+                    var failuresBefore = handler.Summary.FailedApps;
+                    var cachedBefore = handler.Summary.AlreadyUpToDate;
                     await handler.ProcessProductAsync(product, cancellationToken);
-
-                    var versionAfter = ReadPrefillMarker(product.ProductCode);
-
-                    // If the marker is unchanged and existed before, the product was already up to date.
-                    if (!options.Force && versionBefore != null && versionBefore == versionAfter)
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (handler.Summary.FailedApps != failuresBefore)
                     {
-                        alreadyUpToDate++;
-                        _progress.OnAppCompleted(appInfo, AppDownloadResult.AlreadyUpToDate);
+                        failed++;
+                        progress.OnAppCompleted(app, AppDownloadResult.Failed);
                     }
-                    else
+                    else if (handler.Summary.AlreadyUpToDate != cachedBefore)
+                    {
+                        cached++;
+                        progress.OnAppCompleted(app, AppDownloadResult.AlreadyUpToDate);
+                    }
+                    else if (!settings.SkipDownloads)
                     {
                         updated++;
-                        _progress.OnAppCompleted(appInfo, AppDownloadResult.Success);
+                        if (run == null) { progress.OnAppCompleted(app, AppDownloadResult.Success); }
+                        foreach (var key in _downloadSizeCache.Keys.Where(key =>
+                            key.StartsWith(product.ProductCode + "@", StringComparison.Ordinal)))
+                        {
+                            _downloadSizeCache.TryRemove(key, out _);
+                        }
                     }
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested
+                    || run?.Progress.Terminal?.State == "cancelled")
                 {
                     throw;
                 }
-                catch (Exception ex)
+                catch (Exception exception)
                 {
                     failed++;
-                    _progress.OnLog(LogLevel.Warning, $"Prefill failed for {product.DisplayName}: {ex.Message}");
-                    _progress.OnAppCompleted(appInfo, AppDownloadResult.Failed);
+                    progress.OnLog(LogLevel.Warning, $"Prefill failed for {product.DisplayName}: {exception.Message}");
+                    progress.OnAppCompleted(app, AppDownloadResult.Failed);
+                }
+                finally
+                {
+                    if (run == null) { claim.Dispose(); }
                 }
             }
-
-            timer.Stop();
-
-            _progress.OnPrefillCompleted(new PrefillSummary
+            progress.OnPrefillCompleted(new PrefillSummary
             {
-                TotalApps = products.Count,
+                TotalApps = products.Length,
                 UpdatedApps = updated,
-                AlreadyUpToDate = alreadyUpToDate,
+                AlreadyUpToDate = cached,
                 FailedApps = failed,
                 TotalBytesTransferred = (long)handler.Summary.TotalBytesTransferred.Bytes,
                 TotalTime = timer.Elapsed
             });
-
-            _progress.OnOperationCompleted("Prefill operation", timer.Elapsed);
-
             return new PrefillResult
             {
                 Success = failed == 0,
@@ -442,45 +415,25 @@ public sealed class BattleNetPrefillApi : IDisposable
                 TotalTime = timer.Elapsed
             };
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            _progress.OnLog(LogLevel.Info, "Prefill operation cancelled");
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _progress.OnError("Prefill operation failed", ex);
-            return new PrefillResult
-            {
-                Success = false,
-                ErrorMessage = ex.Message,
-                TotalTime = timer.Elapsed
-            };
-        }
-
-        }
         finally
         {
-            // A prefill may have updated product versions; drop cached size estimates so the next status
-            // poll recomputes against the new markers. Then clear the active flag so size passes resume.
-            _downloadSizeCache.Clear();
-            Interlocked.Exchange(ref _isPrefilling, 0);
+            _activeRuns.TryRemove(settings.OperationId, out _);
         }
     }
 
-    private static TactProduct? ResolveProduct(string appId)
+    internal static TactProduct? ResolveProduct(string appId)
     {
         return TactProduct.AllEnumValues
             .FirstOrDefault(p => string.Equals(p.ProductCode, appId, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string PrefillMarkerPath(string productCode)
-        => Path.Combine(AppConfig.CacheDir, $"prefilledVersion-{productCode}.txt");
+    private string PrefillMarkerPath(string productCode)
+        => Path.Combine(_settings.CacheDirectory, $"prefilledVersion-{productCode}.txt");
 
-    private static bool HasPrefillMarker(string productCode)
+    private bool HasPrefillMarker(string productCode)
         => File.Exists(PrefillMarkerPath(productCode));
 
-    private static string? ReadPrefillMarker(string productCode)
+    private string? ReadPrefillMarker(string productCode)
     {
         var path = PrefillMarkerPath(productCode);
         return File.Exists(path) ? File.ReadAllText(path) : null;
@@ -568,68 +521,6 @@ public sealed class BattleNetPrefillApi : IDisposable
 
     private void ThrowIfDisposed()
     {
-        if (_isDisposed)
-            throw new ObjectDisposedException(nameof(BattleNetPrefillApi));
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
     }
-}
-
-public class PrefillOptions
-{
-    public bool DownloadAllOwnedGames { get; set; }
-    public bool Force { get; set; }
-
-    /// <summary>
-    /// Optional explicit list of TACT product codes to prefill. When empty, falls back to
-    /// the selected-apps file (or the full catalog when <see cref="DownloadAllOwnedGames"/> is set).
-    /// </summary>
-    public List<string>? Products { get; set; }
-}
-
-public class PrefillResult
-{
-    public bool Success { get; init; }
-    public string? ErrorMessage { get; init; }
-    public TimeSpan TotalTime { get; init; }
-}
-
-public class ClearCacheResult
-{
-    public bool Success { get; init; }
-    public int FileCount { get; init; }
-    public long BytesCleared { get; init; }
-    public string? Message { get; init; }
-}
-
-public class AppStatus
-{
-    public string AppId { get; init; } = "";
-    public string Name { get; init; } = "";
-    public long DownloadSize { get; init; }
-    public bool IsUpToDate { get; init; }
-}
-
-public class SelectedAppsStatus
-{
-    public List<AppStatus> Apps { get; init; } = new();
-    public long TotalDownloadSize { get; init; }
-    public string? Message { get; init; }
-}
-
-public class OwnedGame
-{
-    public string AppId { get; init; } = string.Empty;
-    public string Name { get; init; } = string.Empty;
-}
-
-public class CacheStatusResult
-{
-    public List<AppCacheStatus> Apps { get; init; } = new();
-    public string? Message { get; init; }
-}
-
-public class AppCacheStatus
-{
-    public string AppId { get; init; } = "";
-    public string Name { get; init; } = "";
-    public bool IsUpToDate { get; init; }
 }

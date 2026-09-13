@@ -10,6 +10,59 @@ namespace BattleNetPrefill.Test;
 public sealed class SocketAdapterTests
 {
     [Fact]
+    public async Task LegacyPrefillRemainsExclusiveAgainstNewAndOldStarts()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
+        await commands.StartAsync();
+        await using var client = await FramedClient.ConnectAsync(commands.BoundTcpPort);
+        await client.SendAsync(new CommandRequest
+        {
+            Id = "legacy",
+            Type = "prefill",
+            Parameters = new Dictionary<string, string> { ["products"] = "[\"d3\"]" }
+        });
+        Assert.True((await ConcurrentPrefillTests.ReadResponseAsync(client, "legacy")).GetProperty("success").GetBoolean());
+        await fixture.Body("d3").Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var next = fixture.Start(Guid.NewGuid().ToString("D"), "s1");
+        await client.SendAsync(next);
+        Assert.Equal("run-limit", (await ConcurrentPrefillTests.ReadResponseAsync(client, next.Id)).GetProperty("error").GetString());
+        await client.SendAsync(new CommandRequest { Id = "legacy-2", Type = "prefill" });
+        Assert.False((await ConcurrentPrefillTests.ReadResponseAsync(client, "legacy-2")).GetProperty("success").GetBoolean());
+        fixture.Body("d3").Release.TrySetResult();
+        await commands.StopAsync();
+    }
+
+    [Fact]
+    public async Task AcceptedRunSurvivesLostAcknowledgementAndReconnect()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
+        await commands.StartAsync();
+        var id = Guid.NewGuid().ToString("D");
+        var first = await FramedClient.ConnectAsync(commands.BoundTcpPort);
+        await first.SendAsync(fixture.Start(id, "d3"));
+        await fixture.Body("d3").Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await first.DisposeAsync();
+        await using var second = await FramedClient.ConnectAsync(commands.BoundTcpPort);
+        await second.SendAsync(new CommandRequest { Id = "reconnect", Type = "status" });
+        var status = (await ConcurrentPrefillTests.ReadResponseAsync(second, "reconnect")).GetProperty("data");
+        Assert.Equal(fixture.Protocol.DaemonInstanceId, status.GetProperty("daemonInstanceId").GetString());
+        Assert.Equal(id, status.GetProperty("activeOperations")[0].GetProperty("operationId").GetString());
+        Assert.True(status.GetProperty("isLoggedIn").GetBoolean());
+        Assert.Equal(2, status.GetProperty("protocolVersion").GetInt32());
+        Assert.Equal(5, status.GetProperty("features").GetArrayLength());
+        await second.SendAsync(new CommandRequest { Id = "single-cancel", Type = "cancel-prefill" });
+        Assert.True((await ConcurrentPrefillTests.ReadResponseAsync(second, "single-cancel")).GetProperty("success").GetBoolean());
+        Assert.Equal(1, fixture.ContentRequests);
+        await second.SendAsync(fixture.Control("repeat", "cancel-prefill", id));
+        Assert.Equal("cancelled", (await ConcurrentPrefillTests.ReadResponseAsync(second, "repeat")).GetProperty("data").GetProperty("state").GetString());
+        await second.SendAsync(fixture.Control("missing", "get-operation", Guid.NewGuid().ToString("D")));
+        Assert.Equal("operation-not-found", (await ConcurrentPrefillTests.ReadResponseAsync(second, "missing")).GetProperty("error").GetString());
+        await commands.StopAsync();
+    }
+
+    [Fact]
     public async Task CancelPrefill_WaitsForCleanup_EmitsCancelled_AndAllowsNewStart()
     {
         var operationStarted = new TaskCompletionSource(
@@ -183,7 +236,7 @@ public sealed class SocketAdapterTests
         Assert.Contains(debugLines, line => line.Contains("visible", StringComparison.Ordinal));
     }
 
-    private sealed class FramedClient : IAsyncDisposable
+    internal sealed class FramedClient : IAsyncDisposable
     {
         private readonly TcpClient _client;
         private readonly NetworkStream _stream;

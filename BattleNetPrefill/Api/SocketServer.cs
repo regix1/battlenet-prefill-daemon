@@ -8,11 +8,6 @@ using System.Text.Json;
 
 namespace BattleNetPrefill.Api;
 
-public enum SocketServerMode
-{
-    UnixSocket,
-    Tcp
-}
 
 public sealed class SocketServer : IAsyncDisposable
 {
@@ -284,7 +279,7 @@ public sealed class SocketServer : IAsyncDisposable
     private static DaemonCommandLane GetCommandLane(string commandType)
         => commandType.ToLowerInvariant() switch
         {
-            "cancel-prefill" or "status" or "shutdown" => DaemonCommandLane.Control,
+            "cancel-prefill" or "status" or "get-operation" or "shutdown" => DaemonCommandLane.Control,
             "prefill" or "set-selected-apps" or "clear-cache" => DaemonCommandLane.Serialized,
             _ => DaemonCommandLane.Concurrent
         };
@@ -305,8 +300,12 @@ public sealed class SocketServer : IAsyncDisposable
 
     private async Task SendEventToClientInternalAsync<T>(ConnectedClient client, T eventData, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo, CancellationToken cancellationToken)
     {
+        using var sendCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        sendCancellation.CancelAfter(TimeSpan.FromSeconds(5));
+        cancellationToken = sendCancellation.Token;
         try
         {
+            if (!string.IsNullOrEmpty(_sharedSecret) && !client.IsAuthenticated) { return; }
             await client.SendLock.WaitAsync(cancellationToken);
             try
             {
@@ -326,6 +325,7 @@ public sealed class SocketServer : IAsyncDisposable
         catch (Exception ex)
         {
             _progress.OnLog(LogLevel.Warning, $"Failed to send event to {client.Id}: {ex.Message}");
+            client.Socket.Dispose();
         }
     }
 
@@ -453,13 +453,6 @@ public sealed class SocketServer : IAsyncDisposable
     }
 }
 
-public class SocketEvent<T>
-{
-    public string Type { get; init; } = string.Empty;
-    public T? Data { get; init; }
-    public DateTime Timestamp { get; init; } = DateTime.UtcNow;
-}
-
 public class ProgressEvent : SocketEvent<PrefillProgressUpdate>
 {
     public ProgressEvent(PrefillProgressUpdate progress)
@@ -476,11 +469,4 @@ public class AuthStateEvent : SocketEvent<AuthStateData>
         Type = "auth-state";
         Data = new AuthStateData { State = state, Message = message, DisplayName = displayName };
     }
-}
-
-public class AuthStateData
-{
-    public string State { get; init; } = string.Empty;
-    public string? Message { get; init; }
-    public string? DisplayName { get; init; }
 }
