@@ -26,7 +26,12 @@ internal sealed class PrefillRun : IPrefillProgress
     {
         lock (_sync)
         {
-            var item = _items[app.AppId] with { State = "completed", Result = "success" };
+            var item = _items[app.AppId] with
+            {
+                State = "completed",
+                Result = "success",
+                CacheRevision = app.CacheRevision
+            };
             if (!Progress.TryCommitItem(item, () =>
             {
                 commit();
@@ -119,7 +124,8 @@ internal sealed class PrefillRun : IPrefillProgress
             {
                 State = outcome == "success" ? "completed" : outcome,
                 Result = outcome,
-                Reason = result == AppDownloadResult.Skipped ? "skippedOverlap" : null
+                Reason = result == AppDownloadResult.Skipped ? "skippedOverlap" : null,
+                CacheRevision = app.CacheRevision
             };
             _items[app.AppId] = item;
             Progress.UpdateItem(item);

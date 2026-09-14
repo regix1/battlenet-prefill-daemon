@@ -135,42 +135,46 @@ public sealed class BattleNetPrefillApi : IDisposable
     }
 
     /// <summary>
-    /// Reports cache status by checking the per-product prefill marker files written after a
-    /// successful prefill. A product is considered "up to date" when a prefilledVersion marker
-    /// exists for it (i.e. it has been prefilled before). A live CDN version comparison is
-    /// performed by the actual prefill run; this status is a lightweight, network-free check.
+    /// Reports cache status by comparing the Manager's stored revision with the current live
+    /// TACT revision for each requested product.
     /// </summary>
-    public Task<CacheStatusResult> CheckCacheStatusAsync(List<string> appIds, CancellationToken cancellationToken = default)
+    public async Task<CacheStatusResult> CheckCacheStatusAsync(List<CachedAppInput> cachedApps, CancellationToken cancellationToken = default)
     {
         ThrowIfNotInitialized();
         ThrowIfDisposed();
 
-        if (appIds.Count == 0)
+        if (cachedApps.Count == 0)
         {
-            return Task.FromResult(new CacheStatusResult
+            return new CacheStatusResult
             {
                 Apps = new List<AppCacheStatus>(),
                 Message = "No app IDs provided"
-            });
+            };
         }
 
         var apps = new List<AppCacheStatus>();
-        foreach (var appId in appIds.Distinct())
+        foreach (var cachedApp in cachedApps
+                     .Where(app => !string.IsNullOrWhiteSpace(app.Revision))
+                     .DistinctBy(app => app.AppId, StringComparer.OrdinalIgnoreCase))
         {
-            var product = ResolveProduct(appId);
+            var product = ResolveProduct(cachedApp.AppId);
+            if (product == null) continue;
+            var handler = new TactProductHandler(_console, false, NullProgress.Instance,
+                _settings with { OperationId = "cache-status", SkipDownloads = true });
+            var currentRevision = await handler.GetProductRevisionAsync(product, cancellationToken);
             apps.Add(new AppCacheStatus
             {
-                AppId = appId,
-                Name = product?.DisplayName ?? appId,
-                IsUpToDate = HasPrefillMarker(appId)
+                AppId = cachedApp.AppId,
+                Name = product.DisplayName,
+                IsUpToDate = StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision)
             });
         }
 
-        return Task.FromResult(new CacheStatusResult
+        return new CacheStatusResult
         {
             Apps = apps,
             Message = $"Checked {apps.Count} apps"
-        });
+        };
     }
 
     /// <summary>
@@ -338,7 +342,10 @@ public sealed class BattleNetPrefillApi : IDisposable
 
         _activeRuns.TryAdd(settings.OperationId, 0);
         var timer = Stopwatch.StartNew();
-        var handler = new TactProductHandler(new ApiConsoleAdapter(progress), force, progress, settings);
+        var cachedApps = run?.Options.CachedApps.ToDictionary(
+            app => app.AppId, app => app.Revision, StringComparer.OrdinalIgnoreCase);
+        var handler = new TactProductHandler(
+            new ApiConsoleAdapter(progress), force, progress, settings, cachedApps);
         var updated = 0;
         var cached = 0;
         var failed = 0;
@@ -362,6 +369,12 @@ public sealed class BattleNetPrefillApi : IDisposable
                     var cachedBefore = handler.Summary.AlreadyUpToDate;
                     await handler.ProcessProductAsync(product, cancellationToken);
                     cancellationToken.ThrowIfCancellationRequested();
+                    var completedApp = new AppDownloadInfo
+                    {
+                        AppId = app.AppId,
+                        Name = app.Name,
+                        CacheRevision = handler.LastRevision
+                    };
                     if (handler.Summary.FailedApps != failuresBefore)
                     {
                         failed++;
@@ -370,12 +383,12 @@ public sealed class BattleNetPrefillApi : IDisposable
                     else if (handler.Summary.AlreadyUpToDate != cachedBefore)
                     {
                         cached++;
-                        progress.OnAppCompleted(app, AppDownloadResult.AlreadyUpToDate);
+                        progress.OnAppCompleted(completedApp, AppDownloadResult.AlreadyUpToDate);
                     }
                     else if (!settings.SkipDownloads)
                     {
                         updated++;
-                        if (run == null) { progress.OnAppCompleted(app, AppDownloadResult.Success); }
+                        if (run == null) { progress.OnAppCompleted(completedApp, AppDownloadResult.Success); }
                         foreach (var key in _downloadSizeCache.Keys.Where(key =>
                             key.StartsWith(product.ProductCode + "@", StringComparison.Ordinal)))
                         {

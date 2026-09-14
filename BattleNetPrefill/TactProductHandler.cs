@@ -8,6 +8,7 @@ namespace BattleNetPrefill
         private readonly bool _forcePrefill;
         private readonly IPrefillProgress _progress;
         private readonly PrefillSettings _settings;
+        private readonly IReadOnlyDictionary<string, string?>? _cachedApps;
 
         private readonly PrefillSummaryResult _prefillSummaryResult = new PrefillSummaryResult();
 
@@ -17,11 +18,18 @@ namespace BattleNetPrefill
         }
 
         internal TactProductHandler(IAnsiConsole ansiConsole, bool forcePrefill, IPrefillProgress progress, PrefillSettings settings)
+            : this(ansiConsole, forcePrefill, progress, settings, null)
+        {
+        }
+
+        internal TactProductHandler(IAnsiConsole ansiConsole, bool forcePrefill, IPrefillProgress progress,
+            PrefillSettings settings, IReadOnlyDictionary<string, string?>? cachedApps)
         {
             _ansiConsole = ansiConsole;
             _forcePrefill = forcePrefill;
             _progress = progress ?? NullProgress.Instance;
             _settings = settings;
+            _cachedApps = cachedApps;
         }
 
         /// <summary>
@@ -29,6 +37,20 @@ namespace BattleNetPrefill
         /// <see cref="PrefillSummaryResult.TotalBytesTransferred"/> summed across every processed product.
         /// </summary>
         public PrefillSummaryResult Summary => _prefillSummaryResult;
+        public string? LastRevision { get; private set; }
+
+        public async Task<string> GetProductRevisionAsync(
+            TactProduct product,
+            CancellationToken cancellationToken = default)
+        {
+            using var cdnRequestManager = new CdnRequestManager(
+                _ansiConsole, _settings with { SkipDownloads = true }, NullProgress.Instance,
+                product.ProductCode, product.DisplayName);
+            var configFileHandler = new ConfigFileHandler(cdnRequestManager);
+            await cdnRequestManager.InitializeAsync(product, cancellationToken);
+            VersionsEntry? targetVersion = await configFileHandler.GetLatestVersionEntryAsync(product, cancellationToken);
+            return targetVersion.Value.versionsName;
+        }
 
         // A separate handler owns the size estimate; process defaults remain unchanged.
         public async Task<long> GetProductDownloadSizeAsync(
@@ -93,6 +115,7 @@ namespace BattleNetPrefill
 
             // Finding the latest version of the game
             VersionsEntry? targetVersion = await configFileHandler.GetLatestVersionEntryAsync(product, cancellationToken);
+            LastRevision = targetVersion.Value.versionsName;
 
             // Skip prefilling if we've already prefilled the latest version
             if (!_forcePrefill && IsProductUpToDate(product, targetVersion.Value))
@@ -170,7 +193,12 @@ namespace BattleNetPrefill
                         if (_settings.Run == null) { Commit(); }
                         else
                         {
-                            _settings.Run.Commit(new AppDownloadInfo { AppId = product.ProductCode, Name = product.DisplayName },
+                            _settings.Run.Commit(new AppDownloadInfo
+                            {
+                                AppId = product.ProductCode,
+                                Name = product.DisplayName,
+                                CacheRevision = targetVersion.Value.versionsName
+                            },
                                 Commit, cancellationToken);
                         }
                     }, cancellationToken);
@@ -190,6 +218,11 @@ namespace BattleNetPrefill
         /// </summary>
         private bool IsProductUpToDate(TactProduct product, VersionsEntry latestVersion)
         {
+            if (_cachedApps != null)
+            {
+                return _cachedApps.TryGetValue(product.ProductCode, out var revision)
+                    && StringComparer.Ordinal.Equals(revision, latestVersion.versionsName);
+            }
             // Checking to see if a file has been previously prefilled
             var versionFilePath = $"{_settings.CacheDirectory}/prefilledVersion-{product.ProductCode}.txt";
             if (!File.Exists(versionFilePath))

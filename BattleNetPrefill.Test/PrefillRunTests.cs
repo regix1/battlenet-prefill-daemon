@@ -87,6 +87,7 @@ public sealed class PrefillRunTests
             var item = Assert.Single(run.Progress.GetPage(0, 100).Items);
             Assert.Equal(cancelFirst ? 0 : 1, writes);
             Assert.Equal(cancelFirst ? "cancelled" : "success", item.Result);
+            Assert.Equal(cancelFirst ? null : "fixture-version", item.CacheRevision);
             Assert.Equal(cancelFirst ? "previous-version" : "fixture-version", await File.ReadAllTextAsync(path));
             Assert.Equal(8, item.BytesTransferred);
             Assert.Equal(cancelFirst ? 0 : 1, run.Progress.Snapshot.CompletedApps);
@@ -146,6 +147,39 @@ public sealed class PrefillRunTests
         Assert.False((await ConcurrentPrefillTests.ReadResponseAsync(client, request.Id)).GetProperty("success").GetBoolean());
         Assert.Equal(0, fixture.ContentRequests);
         await commands.StopAsync();
+    }
+
+    [Fact]
+    public async Task MissingManagerCacheRecordForcesDownloadDespiteLocalMarker()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        fixture.Body("d3").Release.TrySetResult();
+        await File.WriteAllTextAsync(
+            Path.Combine(fixture.Directory, "prefilledVersion-d3.txt"), "fixture-version");
+        using var api = new BattleNetPrefillApi(NullProgress.Instance, fixture.Settings);
+        await api.InitializeAsync();
+        var first = new PrefillRun(Guid.NewGuid().ToString("D"), fixture.Protocol,
+            fixture.Protocol.Capture(new RunOptions
+            {
+                AppIds = ["d3"],
+                CachedApps = [],
+                MaxConcurrency = 1
+            }), NullProgress.Instance);
+        await first.ExecuteAsync(api, CancellationToken.None);
+        Assert.Equal("success", Assert.Single(first.Progress.GetPage(0, 10).Items).Result);
+        var requestsAfterDownload = fixture.ContentRequests;
+        Assert.True(requestsAfterDownload > 0);
+
+        var second = new PrefillRun(Guid.NewGuid().ToString("D"), fixture.Protocol,
+            fixture.Protocol.Capture(new RunOptions
+            {
+                AppIds = ["d3"],
+                CachedApps = [new CachedAppInput { AppId = "d3", Revision = "fixture-version" }],
+                MaxConcurrency = 1
+            }), NullProgress.Instance);
+        await second.ExecuteAsync(api, CancellationToken.None);
+        Assert.Equal("already_cached", Assert.Single(second.Progress.GetPage(0, 10).Items).Result);
+        Assert.Equal(requestsAfterDownload, fixture.ContentRequests);
     }
 
     internal static PrefillRun CreateRun(ConcurrentPrefillTests.TactFixture fixture, params string[] products)

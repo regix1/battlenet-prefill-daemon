@@ -258,6 +258,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
             Reason = terminal ? snapshot.Reason : item?.Reason,
             BytesDownloaded = item?.BytesTransferred ?? 0,
             TotalBytes = item?.TotalBytes ?? 0,
+            CacheRevision = item?.CacheRevision,
             TotalBytesTransferred = snapshot.BytesTransferred,
             TotalApps = snapshot.TotalApps,
             UpdatedApps = snapshot.CompletedApps,
@@ -372,6 +373,10 @@ public sealed class SocketCommandInterface : IAsyncDisposable
                 ids = requested.Select(id => BattleNetPrefillApi.ResolveProduct(id)?.ProductCode
                     ?? throw new ArgumentException("Unknown Battle.net product.")).ToArray();
             }
+            var cachedApps = request.Parameters.TryGetValue("cachedApps", out var cachedJson)
+                ? JsonSerializer.Deserialize(cachedJson, DaemonSerializationContext.Default.ListCachedAppInput)
+                    ?? throw new ArgumentException("cachedApps must be a JSON array.")
+                : [];
             var maximum = _protocol.MaxConcurrentRequests;
             if (request.Parameters.TryGetValue("maxConcurrency", out var maximumText)
                 && !int.TryParse(maximumText, out maximum))
@@ -384,6 +389,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
                 AppIds = ids,
                 Selection = selection,
                 Force = force,
+                CachedApps = cachedApps,
                 MaxConcurrency = maximum
             });
             var run = new PrefillRun(request.Id, _protocol, captured, _progress, PublishAsync);
@@ -504,11 +510,12 @@ public sealed class SocketCommandInterface : IAsyncDisposable
 
     private async Task<CommandResponse> HandleCheckCacheStatusAsync(CommandRequest request, CancellationToken cancellationToken)
     {
-        List<string> appIds;
-        var appIdsJson = request.Parameters?.GetValueOrDefault("appIds");
-        if (!string.IsNullOrEmpty(appIdsJson))
+        List<CachedAppInput> cachedApps;
+        var cachedAppsJson = request.Parameters?.GetValueOrDefault("cachedApps");
+        if (!string.IsNullOrEmpty(cachedAppsJson))
         {
-            appIds = JsonSerializer.Deserialize(appIdsJson, DaemonSerializationContext.Default.ListString) ?? new List<string>();
+            cachedApps = JsonSerializer.Deserialize(cachedAppsJson, DaemonSerializationContext.Default.ListCachedAppInput)
+                ?? throw new ArgumentException("cachedApps must be a JSON array.");
         }
         else
         {
@@ -522,7 +529,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
             };
         }
 
-        var status = await _api.CheckCacheStatusAsync(appIds, cancellationToken);
+        var status = await _api.CheckCacheStatusAsync(cachedApps, cancellationToken);
 
         return new CommandResponse
         {
