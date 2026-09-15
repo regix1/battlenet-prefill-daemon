@@ -150,6 +150,25 @@ public sealed class PrefillRunTests
     }
 
     [Fact]
+    public async Task MissingRevisionUsesStoredMarkerForCacheStatus()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        await File.WriteAllTextAsync(
+            Path.Combine(fixture.Directory, "prefilledVersion-d3.txt"), "fixture-version");
+        using var api = new BattleNetPrefillApi(NullProgress.Instance, fixture.Settings);
+        await api.InitializeAsync();
+
+        var status = await api.CheckCacheStatusAsync([
+            new CachedAppInput { AppId = "d3" },
+            new CachedAppInput { AppId = "fenris" }
+        ]);
+
+        var app = Assert.Single(status.Apps);
+        Assert.Equal("d3", app.AppId);
+        Assert.True(app.IsUpToDate);
+    }
+
+    [Fact]
     public async Task MissingManagerCacheRecordForcesDownloadDespiteLocalMarker()
     {
         using var fixture = new ConcurrentPrefillTests.TactFixture();

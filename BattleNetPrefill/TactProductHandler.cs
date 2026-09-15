@@ -118,7 +118,7 @@ namespace BattleNetPrefill
             LastRevision = targetVersion.Value.versionsName;
 
             // Skip prefilling if we've already prefilled the latest version
-            if (!_forcePrefill && IsProductUpToDate(product, targetVersion.Value))
+            if (!_forcePrefill && IsProductUpToDate(product, targetVersion.Value.versionsName) == true)
             {
                 _prefillSummaryResult.AlreadyUpToDate++;
                 return null;
@@ -216,23 +216,25 @@ namespace BattleNetPrefill
         /// <summary>
         /// Checks to see if the previously prefilled version is up to date with the latest version on the CDN
         /// </summary>
-        private bool IsProductUpToDate(TactProduct product, VersionsEntry latestVersion)
+        internal bool? IsProductUpToDate(TactProduct product, string latestVersion)
         {
             if (_cachedApps != null)
             {
                 return _cachedApps.TryGetValue(product.ProductCode, out var revision)
-                    && StringComparer.Ordinal.Equals(revision, latestVersion.versionsName);
+                    && !string.IsNullOrWhiteSpace(revision)
+                    ? StringComparer.Ordinal.Equals(revision, latestVersion)
+                    : null;
             }
             // Checking to see if a file has been previously prefilled
             var versionFilePath = $"{_settings.CacheDirectory}/prefilledVersion-{product.ProductCode}.txt";
             if (!File.Exists(versionFilePath))
             {
-                return false;
+                return null;
             }
 
             // Checking to see if the game version previously prefilled is up to date with the latest version on the CDN.
             var lastPrefilledVersion = File.ReadAllText(versionFilePath);
-            return latestVersion.versionsName == lastPrefilledVersion;
+            return latestVersion == lastPrefilledVersion;
         }
 
 

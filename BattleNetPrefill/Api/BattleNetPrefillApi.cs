@@ -154,7 +154,6 @@ public sealed class BattleNetPrefillApi : IDisposable
 
         var apps = new List<AppCacheStatus>();
         foreach (var cachedApp in cachedApps
-                     .Where(app => !string.IsNullOrWhiteSpace(app.Revision))
                      .DistinctBy(app => app.AppId, StringComparer.OrdinalIgnoreCase))
         {
             var product = ResolveProduct(cachedApp.AppId);
@@ -162,11 +161,15 @@ public sealed class BattleNetPrefillApi : IDisposable
             var handler = new TactProductHandler(_console, false, NullProgress.Instance,
                 _settings with { OperationId = "cache-status", SkipDownloads = true });
             var currentRevision = await handler.GetProductRevisionAsync(product, cancellationToken);
+            var isUpToDate = string.IsNullOrWhiteSpace(cachedApp.Revision)
+                ? handler.IsProductUpToDate(product, currentRevision)
+                : StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision);
+            if (!isUpToDate.HasValue) continue;
             apps.Add(new AppCacheStatus
             {
                 AppId = cachedApp.AppId,
                 Name = product.DisplayName,
-                IsUpToDate = StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision)
+                IsUpToDate = isUpToDate.Value
             });
         }
 
