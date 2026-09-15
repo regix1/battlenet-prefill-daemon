@@ -10,6 +10,7 @@ namespace BattleNetPrefill.Api;
 [JsonSerializable(typeof(CommandResponse))]
 [JsonSerializable(typeof(List<OwnedGame>))]
 [JsonSerializable(typeof(List<string>))]
+[JsonSerializable(typeof(List<CachedAppInput>))]
 [JsonSerializable(typeof(PrefillResult))]
 [JsonSerializable(typeof(StatusData))]
 [JsonSerializable(typeof(PrefillProgressUpdate))]
