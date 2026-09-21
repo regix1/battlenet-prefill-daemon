@@ -51,7 +51,9 @@ public sealed class SocketAdapterTests
         Assert.Equal(id, status.GetProperty("activeOperations")[0].GetProperty("operationId").GetString());
         Assert.True(status.GetProperty("isLoggedIn").GetBoolean());
         Assert.Equal(2, status.GetProperty("protocolVersion").GetInt32());
-        Assert.Equal(5, status.GetProperty("features").GetArrayLength());
+        Assert.Equal(6, status.GetProperty("features").GetArrayLength());
+        Assert.Contains(status.GetProperty("features").EnumerateArray(),
+            feature => feature.GetString() == "cacheStatusV2");
         await second.SendAsync(new CommandRequest { Id = "single-cancel", Type = "cancel-prefill" });
         Assert.True((await ConcurrentPrefillTests.ReadResponseAsync(second, "single-cancel")).GetProperty("success").GetBoolean());
         Assert.Equal(1, fixture.ContentRequests);

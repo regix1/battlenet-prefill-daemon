@@ -21,8 +21,11 @@ namespace BattleNetPrefill.Api;
 /// </summary>
 public sealed class BattleNetPrefillApi : IDisposable
 {
+    private static readonly TimeSpan CacheStatusResponseReserve = TimeSpan.FromSeconds(2);
+
     private readonly IPrefillProgress _progress;
     private readonly IAnsiConsole _console;
+    private readonly TimeProvider _clock;
 
     private List<string>? _selectedAppsCache;
     private bool _isInitialized;
@@ -45,16 +48,20 @@ public sealed class BattleNetPrefillApi : IDisposable
 
     public bool IsPrefilling => !_activeRuns.IsEmpty;
 
-    public BattleNetPrefillApi(IPrefillProgress? progress = null)
-        : this(progress ?? NullProgress.Instance, AppConfig.Capture())
+    public BattleNetPrefillApi(IPrefillProgress? progress = null, TimeProvider? clock = null)
+        : this(progress ?? NullProgress.Instance, AppConfig.Capture(), clock)
     {
     }
 
-    internal BattleNetPrefillApi(IPrefillProgress progress, PrefillSettings settings)
+    internal BattleNetPrefillApi(
+        IPrefillProgress progress,
+        PrefillSettings settings,
+        TimeProvider? clock = null)
     {
         _progress = progress ?? NullProgress.Instance;
         _console = new ApiConsoleAdapter(_progress);
         _settings = settings;
+        _clock = clock ?? TimeProvider.System;
     }
 
     public bool IsInitialized => _isInitialized;
@@ -138,47 +145,196 @@ public sealed class BattleNetPrefillApi : IDisposable
     /// Reports cache status by comparing the Manager's stored revision with the current live
     /// TACT revision for each requested product.
     /// </summary>
-    public async Task<CacheStatusResult> CheckCacheStatusAsync(List<CachedAppInput> cachedApps, CancellationToken cancellationToken = default)
+#pragma warning disable CA1068 // The existing cancellation-token position is part of the public compatibility contract.
+    public async Task<CacheStatusResult> CheckCacheStatusAsync(
+        List<CachedAppInput> cachedApps,
+        CancellationToken cancellationToken = default,
+        DateTimeOffset? expiresAtUtc = null,
+        int? cacheStatusVersion = null)
     {
         ThrowIfNotInitialized();
         ThrowIfDisposed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (cacheStatusVersion is not null and not 2)
+        {
+            throw new ArgumentException("cacheStatusVersion must be 2.", nameof(cacheStatusVersion));
+        }
+
+        if (cacheStatusVersion == 2)
+        {
+            if (!expiresAtUtc.HasValue)
+            {
+                throw new ArgumentException("expiresAtUtc is required for cacheStatusVersion 2.", nameof(expiresAtUtc));
+            }
+            if (cachedApps.Any(app => string.IsNullOrWhiteSpace(app.AppId)))
+            {
+                throw new ArgumentException("Every cached app must have a nonempty appId.", nameof(cachedApps));
+            }
+            if (cachedApps.Select(app => app.AppId).Distinct(StringComparer.OrdinalIgnoreCase).Count() != cachedApps.Count)
+            {
+                throw new ArgumentException("cachedApps appId values must be unique.", nameof(cachedApps));
+            }
+        }
 
         if (cachedApps.Count == 0)
         {
             return new CacheStatusResult
             {
                 Apps = new List<AppCacheStatus>(),
-                Message = "No app IDs provided"
+                Message = cacheStatusVersion == 2 ? null : "No app IDs provided",
+                Version = cacheStatusVersion
             };
         }
 
+        var requestedApps = cacheStatusVersion == 2
+            ? cachedApps
+            : cachedApps.DistinctBy(app => app.AppId, StringComparer.OrdinalIgnoreCase).ToList();
         var apps = new List<AppCacheStatus>();
-        foreach (var cachedApp in cachedApps
-                     .DistinctBy(app => app.AppId, StringComparer.OrdinalIgnoreCase))
-        {
-            var product = ResolveProduct(cachedApp.AppId);
-            if (product == null) continue;
-            var handler = new TactProductHandler(_console, false, NullProgress.Instance,
-                _settings with { OperationId = "cache-status", SkipDownloads = true });
-            var currentRevision = await handler.GetProductRevisionAsync(product, cancellationToken);
-            var isUpToDate = string.IsNullOrWhiteSpace(cachedApp.Revision)
-                ? handler.IsProductUpToDate(product, currentRevision)
-                : StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision);
-            if (!isUpToDate.HasValue) continue;
-            apps.Add(new AppCacheStatus
+
+        bool DeadlineReached()
+            => expiresAtUtc.HasValue
+                && expiresAtUtc.Value - _clock.GetUtcNow() <= CacheStatusResponseReserve;
+
+        AppCacheStatus UnknownStatus(CachedAppInput cachedApp, CacheReason reason, TactProduct? product = null)
+            => new()
             {
                 AppId = cachedApp.AppId,
-                Name = product.DisplayName,
-                IsUpToDate = isUpToDate.Value
-            });
+                Name = product?.DisplayName ?? cachedApp.AppId,
+                IsUpToDate = false,
+                Outcome = CacheOutcome.Unknown,
+                Reason = reason
+            };
+
+        if (DeadlineReached())
+        {
+            if (cacheStatusVersion == 2)
+            {
+                apps.AddRange(requestedApps.Select(app => UnknownStatus(app, CacheReason.DeadlineReached)));
+            }
+            return new CacheStatusResult
+            {
+                Apps = apps,
+                Message = cacheStatusVersion == 2 ? null : $"Checked {apps.Count} apps",
+                Version = cacheStatusVersion
+            };
+        }
+
+        using var inspectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var deadlineTimer = expiresAtUtc.HasValue
+            ? _clock.CreateTimer(
+                static state => _ = ((CancellationTokenSource)state!).CancelAsync(),
+                inspectionCancellation,
+                expiresAtUtc.Value - _clock.GetUtcNow() - CacheStatusResponseReserve,
+                Timeout.InfiniteTimeSpan)
+            : null;
+
+        var deadlineIndex = requestedApps.Count;
+        for (var index = 0; index < requestedApps.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (DeadlineReached())
+            {
+                deadlineIndex = index;
+                break;
+            }
+
+            var cachedApp = requestedApps[index];
+            var product = ResolveProduct(cachedApp.AppId);
+            if (product == null)
+            {
+                if (cacheStatusVersion == 2)
+                {
+                    apps.Add(UnknownStatus(cachedApp, CacheReason.MissingApp));
+                }
+                continue;
+            }
+
+            try
+            {
+                var handler = new TactProductHandler(_console, false, NullProgress.Instance,
+                    _settings with { OperationId = "cache-status", SkipDownloads = true });
+                var currentRevision = await handler.GetProductRevisionAsync(product, inspectionCancellation.Token);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (DeadlineReached() || inspectionCancellation.IsCancellationRequested)
+                {
+                    deadlineIndex = index;
+                    break;
+                }
+                if (string.IsNullOrWhiteSpace(currentRevision))
+                {
+                    if (cacheStatusVersion == 2)
+                    {
+                        apps.Add(UnknownStatus(cachedApp, CacheReason.ManifestUnavailable, product));
+                    }
+                    continue;
+                }
+
+                var isUpToDate = string.IsNullOrWhiteSpace(cachedApp.Revision)
+                    ? handler.IsProductUpToDate(product, currentRevision)
+                    : StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision);
+                if (!isUpToDate.HasValue)
+                {
+                    if (cacheStatusVersion == 2)
+                    {
+                        apps.Add(UnknownStatus(cachedApp, CacheReason.NoCacheEvidence, product));
+                    }
+                    continue;
+                }
+
+                apps.Add(new AppCacheStatus
+                {
+                    AppId = cachedApp.AppId,
+                    Name = product.DisplayName,
+                    IsUpToDate = isUpToDate.Value,
+                    Outcome = cacheStatusVersion == 2
+                        ? isUpToDate.Value ? CacheOutcome.Current : CacheOutcome.Outdated
+                        : null
+                });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (inspectionCancellation.IsCancellationRequested)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                deadlineIndex = index;
+                break;
+            }
+            catch (Exception exception)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (DeadlineReached() || inspectionCancellation.IsCancellationRequested)
+                {
+                    deadlineIndex = index;
+                    break;
+                }
+                _progress.OnLog(LogLevel.Warning,
+                    $"Failed to inspect cache status for {product.DisplayName}: {exception.Message}");
+                if (cacheStatusVersion == 2)
+                {
+                    apps.Add(UnknownStatus(cachedApp, CacheReason.InspectionFailed, product));
+                }
+            }
+        }
+
+        if (cacheStatusVersion == 2)
+        {
+            for (var index = deadlineIndex; index < requestedApps.Count; index++)
+            {
+                apps.Add(UnknownStatus(requestedApps[index], CacheReason.DeadlineReached));
+            }
         }
 
         return new CacheStatusResult
         {
             Apps = apps,
-            Message = $"Checked {apps.Count} apps"
+            Message = cacheStatusVersion == 2 ? null : $"Checked {apps.Count} apps",
+            Version = cacheStatusVersion
         };
     }
+#pragma warning restore CA1068
 
     /// <summary>
     /// Status of the currently selected apps, including whether each has been prefilled before.

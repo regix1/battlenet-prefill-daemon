@@ -59,19 +59,6 @@ public class OwnedGame
     public string Name { get; init; } = string.Empty;
 }
 
-public class CacheStatusResult
-{
-    public List<AppCacheStatus> Apps { get; init; } = new();
-    public string? Message { get; init; }
-}
-
-public class AppCacheStatus
-{
-    public string AppId { get; init; } = "";
-    public string Name { get; init; } = "";
-    public bool IsUpToDate { get; init; }
-}
-
 public class StatusData
 {
     public bool IsLoggedIn { get; init; }

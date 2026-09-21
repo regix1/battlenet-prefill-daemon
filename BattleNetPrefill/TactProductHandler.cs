@@ -39,7 +39,7 @@ namespace BattleNetPrefill
         public PrefillSummaryResult Summary => _prefillSummaryResult;
         public string? LastRevision { get; private set; }
 
-        public async Task<string> GetProductRevisionAsync(
+        public async Task<string?> GetProductRevisionAsync(
             TactProduct product,
             CancellationToken cancellationToken = default)
         {
@@ -47,7 +47,6 @@ namespace BattleNetPrefill
                 _ansiConsole, _settings with { SkipDownloads = true }, NullProgress.Instance,
                 product.ProductCode, product.DisplayName);
             var configFileHandler = new ConfigFileHandler(cdnRequestManager);
-            await cdnRequestManager.InitializeAsync(product, cancellationToken);
             VersionsEntry? targetVersion = await configFileHandler.GetLatestVersionEntryAsync(product, cancellationToken);
             return targetVersion.Value.versionsName;
         }

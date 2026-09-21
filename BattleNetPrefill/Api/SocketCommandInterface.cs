@@ -15,6 +15,9 @@ namespace BattleNetPrefill.Api;
 /// </summary>
 public sealed class SocketCommandInterface : IAsyncDisposable
 {
+    private static readonly IReadOnlyList<string> StatusFeatures =
+        PrefillProtocol.Features.Append("cacheStatusV2").ToArray();
+
     private readonly SocketServer _socketServer;
     private readonly SocketProgress _progress;
     private readonly CancellationTokenSource _cts = new();
@@ -24,31 +27,35 @@ public sealed class SocketCommandInterface : IAsyncDisposable
     private readonly Func<PrefillOptions, CancellationToken, Task<PrefillResult>> _prefillAsync;
     private bool _disposed;
 
-    public SocketCommandInterface(string socketPath)
+    public SocketCommandInterface(string socketPath, TimeProvider? clock = null)
     {
         _protocol = AppConfig.Protocol;
         _prefillOperation = new OwnedOperationCoordinator(_protocol.MaxConcurrentRuns);
         _progress = new SocketProgress();
         _socketServer = new SocketServer(socketPath, _progress);
-        _api = new BattleNetPrefillApi(_progress);
+        _api = new BattleNetPrefillApi(_progress, clock);
         _prefillAsync = _api.PrefillAsync;
         _socketServer.OnCommand = HandleCommandAsync;
 
         _progress.SocketServer = _socketServer;
     }
 
-    public SocketCommandInterface(int tcpPort)
-        : this(tcpPort, AppConfig.Protocol, AppConfig.Capture())
+    public SocketCommandInterface(int tcpPort, TimeProvider? clock = null)
+        : this(tcpPort, AppConfig.Protocol, AppConfig.Capture(), clock)
     {
     }
 
-    internal SocketCommandInterface(int tcpPort, PrefillProtocol protocol, PrefillSettings settings)
+    internal SocketCommandInterface(
+        int tcpPort,
+        PrefillProtocol protocol,
+        PrefillSettings settings,
+        TimeProvider? clock = null)
     {
         _protocol = protocol;
         _prefillOperation = new OwnedOperationCoordinator(protocol.MaxConcurrentRuns);
         _progress = new SocketProgress();
         _socketServer = new SocketServer(tcpPort, _progress);
-        _api = new BattleNetPrefillApi(_progress, settings);
+        _api = new BattleNetPrefillApi(_progress, settings, clock);
         _prefillAsync = _api.PrefillAsync;
         _socketServer.OnCommand = HandleCommandAsync;
 
@@ -222,6 +229,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
                 DaemonInstanceId = _protocol.DaemonInstanceId,
                 MaxConcurrentRuns = _protocol.MaxConcurrentRuns,
                 MaxConcurrentRequests = _protocol.MaxConcurrentRequests,
+                Features = StatusFeatures,
                 ActiveOperations = _prefillOperation.GetActiveOperations(),
                 RecentOperations = _prefillOperation.GetRecentOperations()
             },
@@ -510,26 +518,77 @@ public sealed class SocketCommandInterface : IAsyncDisposable
 
     private async Task<CommandResponse> HandleCheckCacheStatusAsync(CommandRequest request, CancellationToken cancellationToken)
     {
+        var cacheStatusVersion = default(int?);
+        if (request.Parameters?.TryGetValue("cacheStatusVersion", out var versionText) == true)
+        {
+            if (!int.TryParse(versionText, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out var version)
+                || version != 2)
+            {
+                throw new ArgumentException("cacheStatusVersion must be 2.");
+            }
+            cacheStatusVersion = version;
+        }
+
+        var expiresAtUtc = default(DateTimeOffset?);
+        if (request.Parameters?.TryGetValue("expiresAtUtc", out var expiryText) == true)
+        {
+            if (!DateTimeOffset.TryParseExact(
+                    expiryText,
+                    "O",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None,
+                    out var expiry)
+                || expiry.Offset != TimeSpan.Zero)
+            {
+                throw new ArgumentException("expiresAtUtc must be a UTC round-trip timestamp.");
+            }
+            expiresAtUtc = expiry;
+        }
+        else if (cacheStatusVersion == 2)
+        {
+            throw new ArgumentException("expiresAtUtc is required for cacheStatusVersion 2.");
+        }
+
         List<CachedAppInput> cachedApps;
         var cachedAppsJson = request.Parameters?.GetValueOrDefault("cachedApps");
         if (!string.IsNullOrEmpty(cachedAppsJson))
         {
+            using var cachedAppsDocument = JsonDocument.Parse(cachedAppsJson);
+            if (cachedAppsDocument.RootElement.ValueKind != JsonValueKind.Array
+                || cachedAppsDocument.RootElement.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.Object))
+            {
+                throw new ArgumentException("cachedApps must be an array of objects.");
+            }
             cachedApps = JsonSerializer.Deserialize(cachedAppsJson, DaemonSerializationContext.Default.ListCachedAppInput)
                 ?? throw new ArgumentException("cachedApps must be a JSON array.");
         }
         else
         {
+            if (cacheStatusVersion == 2)
+            {
+                throw new ArgumentException("cachedApps is required for cacheStatusVersion 2.");
+            }
             return new CommandResponse
             {
                 Id = request.Id,
                 Success = true,
-                Data = new CacheStatusResult { Apps = new List<AppCacheStatus>(), Message = "No app IDs provided" },
+                Data = new CacheStatusResult
+                {
+                    Apps = new List<AppCacheStatus>(),
+                    Message = "No app IDs provided",
+                    Version = cacheStatusVersion
+                },
                 Message = "No app IDs provided",
                 CompletedAt = DateTime.UtcNow
             };
         }
 
-        var status = await _api.CheckCacheStatusAsync(cachedApps, cancellationToken);
+        var status = await _api.CheckCacheStatusAsync(
+            cachedApps,
+            cancellationToken,
+            expiresAtUtc,
+            cacheStatusVersion);
 
         return new CommandResponse
         {

@@ -19,6 +19,8 @@ namespace BattleNetPrefill.Api;
 [JsonSerializable(typeof(SelectedAppsStatus))]
 [JsonSerializable(typeof(CacheStatusResult))]
 [JsonSerializable(typeof(AppCacheStatus))]
+[JsonSerializable(typeof(CacheOutcome))]
+[JsonSerializable(typeof(CacheReason))]
 // Socket event types
 [JsonSerializable(typeof(SocketEvent<PrefillProgressUpdate>))]
 [JsonSerializable(typeof(SocketEvent<AuthStateData>))]
