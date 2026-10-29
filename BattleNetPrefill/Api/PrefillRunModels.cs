@@ -9,20 +9,6 @@ using System.Text.Json;
 
 namespace BattleNetPrefill.Api;
 
-public class PrefillOptions
-{
-    public bool DownloadAllOwnedGames { get; set; }
-    public bool Force { get; set; }
-
-    /// <summary>
-    /// Optional explicit list of TACT product codes to prefill. When empty, falls back to
-    /// the selected-apps file (or the full catalog when <see cref="DownloadAllOwnedGames"/> is set).
-    /// </summary>
-#pragma warning disable CA2227 // The socket request serializer replaces this collection from JSON.
-    public List<string>? Products { get; set; }
-#pragma warning restore CA2227
-}
-
 public class PrefillResult
 {
     public bool Success { get; init; }
@@ -91,6 +77,7 @@ public class CommandResponse
     public bool Success { get; set; }
     public string? Message { get; set; }
     public string? Error { get; set; }
+    public string? ErrorCode { get; set; }
     public object? Data { get; set; }
     public bool RequiresLogin { get; set; }
     public DateTime CompletedAt { get; set; } = DateTime.UtcNow;

@@ -24,7 +24,6 @@ public sealed class SocketCommandInterface : IAsyncDisposable
     private readonly OwnedOperationCoordinator _prefillOperation;
     private readonly PrefillProtocol _protocol;
     private readonly BattleNetPrefillApi _api;
-    private readonly Func<PrefillOptions, CancellationToken, Task<PrefillResult>> _prefillAsync;
     private bool _disposed;
 
     public SocketCommandInterface(string socketPath, TimeProvider? clock = null)
@@ -34,7 +33,6 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         _progress = new SocketProgress();
         _socketServer = new SocketServer(socketPath, _progress);
         _api = new BattleNetPrefillApi(_progress, clock);
-        _prefillAsync = _api.PrefillAsync;
         _socketServer.OnCommand = HandleCommandAsync;
 
         _progress.SocketServer = _socketServer;
@@ -56,18 +54,9 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         _progress = new SocketProgress();
         _socketServer = new SocketServer(tcpPort, _progress);
         _api = new BattleNetPrefillApi(_progress, settings, clock);
-        _prefillAsync = _api.PrefillAsync;
         _socketServer.OnCommand = HandleCommandAsync;
 
         _progress.SocketServer = _socketServer;
-    }
-
-    internal SocketCommandInterface(
-        int tcpPort,
-        Func<PrefillOptions, CancellationToken, Task<PrefillResult>> prefillAsync)
-        : this(tcpPort)
-    {
-        _prefillAsync = prefillAsync ?? throw new ArgumentNullException(nameof(prefillAsync));
     }
 
     internal int BoundTcpPort => _socketServer.BoundTcpPort;
@@ -158,7 +147,8 @@ public sealed class SocketCommandInterface : IAsyncDisposable
                 Id = request.Id,
                 Success = operation != null,
                 Data = operation,
-                Error = operation == null ? "operation-not-found" : null
+                Error = operation == null ? "operation-not-found" : null,
+                ErrorCode = operation == null ? "operation-not-found" : null
             };
         }
         if (!_prefillOperation.IsRunning)
@@ -245,7 +235,14 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         var offset = parameters.TryGetValue("offset", out var offsetText) ? int.Parse(offsetText, System.Globalization.CultureInfo.InvariantCulture) : 0;
         var limit = parameters.TryGetValue("limit", out var limitText) ? int.Parse(limitText, System.Globalization.CultureInfo.InvariantCulture) : 100;
         var page = _prefillOperation.GetOperation(id, offset, limit);
-        return new CommandResponse { Id = request.Id, Success = page != null, Data = page, Error = page == null ? "operation-not-found" : null };
+        return new CommandResponse
+        {
+            Id = request.Id,
+            Success = page != null,
+            Data = page,
+            Error = page == null ? "operation-not-found" : null,
+            ErrorCode = page == null ? "operation-not-found" : null
+        };
     }
 
     private Task PublishAsync(RunSnapshot snapshot, CancellationToken cancellationToken)
@@ -363,127 +360,53 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         CommandRequest request,
         CancellationToken cancellationToken)
     {
-        if (request.Parameters?.ContainsKey("protocolVersion") == true)
+        if (request.Parameters?.GetValueOrDefault("protocolVersion") != "2") return new CommandResponse { Id = request.Id, Success = false, ErrorCode = "daemon-outdated", Error = "This daemon only accepts protocol version 2.", CompletedAt = DateTime.UtcNow };
+        _protocol.ValidateInstance(request.Parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty);
+        if (!_api.IsInitialized) { throw new InvalidOperationException("Daemon is not ready."); }
+        if (!Guid.TryParse(request.Id, out _)) { throw new ArgumentException("operationId must be a GUID."); }
+        var selection = request.Parameters.GetValueOrDefault("selection") ?? "selected";
+        if (bool.TryParse(request.Parameters.GetValueOrDefault("all"), out var all) && all) { selection = "all"; }
+        if (selection is not ("selected" or "all")) { throw new ArgumentException("Unsupported selection preset."); }
+        IReadOnlyList<string>? ids = null;
+        if (request.Parameters.TryGetValue("appIds", out var json))
         {
-            if (request.Parameters["protocolVersion"] != "2")
-                throw new ArgumentException("Unsupported protocolVersion.");
-            _protocol.ValidateInstance(request.Parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty);
-            if (!_api.IsInitialized) { throw new InvalidOperationException("Daemon is not ready."); }
-            if (!Guid.TryParse(request.Id, out _)) { throw new ArgumentException("operationId must be a GUID."); }
-            var selection = request.Parameters.GetValueOrDefault("selection") ?? "selected";
-            if (bool.TryParse(request.Parameters.GetValueOrDefault("all"), out var all) && all) { selection = "all"; }
-            if (selection is not ("selected" or "all")) { throw new ArgumentException("Unsupported selection preset."); }
-            IReadOnlyList<string>? ids = null;
-            if (request.Parameters.TryGetValue("appIds", out var json))
-            {
-                var requested = JsonSerializer.Deserialize(json, DaemonSerializationContext.Default.ListString)
-                    ?? throw new ArgumentException("appIds must be a JSON array.");
-                ids = requested.Select(id => BattleNetPrefillApi.ResolveProduct(id)?.ProductCode
-                    ?? throw new ArgumentException("Unknown Battle.net product.")).ToArray();
-            }
-            var cachedApps = request.Parameters.TryGetValue("cachedApps", out var cachedJson)
-                ? JsonSerializer.Deserialize(cachedJson, DaemonSerializationContext.Default.ListCachedAppInput)
-                    ?? throw new ArgumentException("cachedApps must be a JSON array.")
-                : [];
-            var maximum = _protocol.MaxConcurrentRequests;
-            if (request.Parameters.TryGetValue("maxConcurrency", out var maximumText)
-                && !int.TryParse(maximumText, out maximum))
-                throw new ArgumentException("Invalid maxConcurrency.");
-            var force = false;
-            if (request.Parameters.TryGetValue("force", out var forceText) && !bool.TryParse(forceText, out force))
-                throw new ArgumentException("Invalid force.");
-            var captured = _protocol.Capture(new RunOptions
-            {
-                AppIds = ids,
-                Selection = selection,
-                Force = force,
-                CachedApps = cachedApps,
-                MaxConcurrency = maximum
-            });
-            var run = new PrefillRun(request.Id, _protocol, captured, _progress, PublishAsync);
-            cancellationToken.ThrowIfCancellationRequested();
-            var admission = await _prefillOperation.StartAsync(request.Id, PrefillProtocol.Fingerprint(captured),
-                run.Progress, token => run.ExecuteAsync(_api, token), _cts.Token);
-            return new CommandResponse
-            {
-                Id = request.Id,
-                Success = admission.Accepted,
-                Error = admission.Error,
-                Data = admission.Accepted
-                    ? new PrefillStart(true, request.Id, _protocol.DaemonInstanceId,
-                        admission.Replayed ? admission.Operation!.State : "started")
-                    : null
-            };
+            var requested = JsonSerializer.Deserialize(json, DaemonSerializationContext.Default.ListString)
+                ?? throw new ArgumentException("appIds must be a JSON array.");
+            ids = requested.Select(id => BattleNetPrefillApi.ResolveProduct(id)?.ProductCode
+                ?? throw new ArgumentException("Unknown Battle.net product.")).ToArray();
         }
-        if (_prefillOperation.IsRunning || _api.IsPrefilling)
+        var cachedApps = request.Parameters.TryGetValue("cachedApps", out var cachedJson)
+            ? JsonSerializer.Deserialize(cachedJson, DaemonSerializationContext.Default.ListCachedAppInput)
+                ?? throw new ArgumentException("cachedApps must be a JSON array.")
+            : [];
+        var maximum = _protocol.MaxConcurrentRequests;
+        if (request.Parameters.TryGetValue("maxConcurrency", out var maximumText)
+            && !int.TryParse(maximumText, out maximum))
+            throw new ArgumentException("Invalid maxConcurrency.");
+        var force = false;
+        if (request.Parameters.TryGetValue("force", out var forceText) && !bool.TryParse(forceText, out force))
+            throw new ArgumentException("Invalid force.");
+        var captured = _protocol.Capture(new RunOptions
         {
-            return new CommandResponse
-            {
-                Id = request.Id,
-                Success = false,
-                Error = "A prefill is already in progress",
-                CompletedAt = DateTime.UtcNow
-            };
-        }
-
-        var options = new PrefillOptions();
-
-        if (request.Parameters != null)
-        {
-            if (bool.TryParse(request.Parameters.GetValueOrDefault("all"), out var all))
-                options.DownloadAllOwnedGames = all;
-            if (bool.TryParse(request.Parameters.GetValueOrDefault("force"), out var force))
-                options.Force = force;
-
-            var productsJson = request.Parameters.GetValueOrDefault("products");
-            if (!string.IsNullOrEmpty(productsJson))
-            {
-                options.Products = JsonSerializer.Deserialize(productsJson, DaemonSerializationContext.Default.ListString);
-            }
-        }
-
+            AppIds = ids,
+            Selection = selection,
+            Force = force,
+            CachedApps = cachedApps,
+            MaxConcurrency = maximum
+        });
+        var run = new PrefillRun(request.Id, _protocol, captured, _progress, PublishAsync);
         cancellationToken.ThrowIfCancellationRequested();
-        try
-        {
-            await _prefillOperation.StartAsync(async operationToken =>
-            {
-                try
-                {
-                    var result = await _prefillAsync(options, operationToken);
-
-                    if (result.Success)
-                        _progress.OnLog(LogLevel.Info, "Prefill completed successfully");
-                    else
-                        _progress.OnLog(LogLevel.Warning, $"Prefill completed with errors: {result.ErrorMessage}");
-                }
-                catch (OperationCanceledException) when (operationToken.IsCancellationRequested)
-                {
-                    _progress.OnPrefillCancelled("Prefill cancelled by user");
-                }
-                catch (Exception ex)
-                {
-                    _progress.OnError($"Prefill failed: {ex.Message}", ex);
-                    throw;
-                }
-            }, _cts.Token);
-        }
-        catch (InvalidOperationException)
-        {
-            return new CommandResponse
-            {
-                Id = request.Id,
-                Success = false,
-                Error = "A prefill is already in progress",
-                CompletedAt = DateTime.UtcNow
-            };
-        }
-
+        var admission = await _prefillOperation.StartAsync(request.Id, PrefillProtocol.Fingerprint(captured),
+            run.Progress, token => run.ExecuteAsync(_api, token), _cts.Token);
         return new CommandResponse
         {
             Id = request.Id,
-            Success = true,
-            Message = "Prefill started",
-            CompletedAt = DateTime.UtcNow
+            Success = admission.Accepted,
+            Error = admission.Error,
+            Data = admission.Accepted
+                ? new PrefillStart(true, request.Id, _protocol.DaemonInstanceId,
+                    admission.Replayed ? admission.Operation!.State : "started")
+                : null
         };
     }
 
@@ -767,17 +690,6 @@ public sealed class SocketCommandInterface : IAsyncDisposable
                 FailedApps = summary.FailedApps,
                 TotalBytesTransferred = summary.TotalBytesTransferred,
                 TotalTime = summary.TotalTime,
-                UpdatedAt = DateTime.UtcNow
-            });
-        }
-
-        public void OnPrefillCancelled(string message)
-        {
-            OnLog(LogLevel.Info, message);
-            BroadcastProgress(new PrefillProgressUpdate
-            {
-                State = "cancelled",
-                ErrorMessage = message,
                 UpdatedAt = DateTime.UtcNow
             });
         }

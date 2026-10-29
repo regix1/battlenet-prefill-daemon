@@ -453,22 +453,6 @@ public sealed class BattleNetPrefillApi : IDisposable
         return $"{productCode}@{version}";
     }
 
-    /// <summary>
-    /// Runs the prefill operation, emitting structured progress events per product.
-    /// </summary>
-    public Task<PrefillResult> PrefillAsync(
-        PrefillOptions? options = null, CancellationToken cancellationToken = default)
-    {
-        options ??= new PrefillOptions();
-        var ids = options.Products is { Count: > 0 }
-            ? options.Products.ToArray()
-            : options.DownloadAllOwnedGames
-                ? TactProduct.AllEnumValues.Select(product => product.ProductCode).ToArray()
-                : GetSelectedApps().ToArray();
-        return PrefillAsync(ids, options.Force, _progress,
-            _settings with { OperationId = Guid.NewGuid().ToString("D") }, null, cancellationToken);
-    }
-
     internal Task<PrefillResult> PrefillAsync(PrefillRun run, CancellationToken cancellationToken)
     {
         var ids = run.Options.AppIds
@@ -487,7 +471,7 @@ public sealed class BattleNetPrefillApi : IDisposable
     }
 
     private async Task<PrefillResult> PrefillAsync(IReadOnlyList<string> ids, bool force,
-        IPrefillProgress progress, PrefillSettings settings, PrefillRun? run,
+        PrefillRun progress, PrefillSettings settings, PrefillRun run,
         CancellationToken cancellationToken)
     {
         ThrowIfNotInitialized();
@@ -501,7 +485,7 @@ public sealed class BattleNetPrefillApi : IDisposable
 
         _activeRuns.TryAdd(settings.OperationId, 0);
         var timer = Stopwatch.StartNew();
-        var cachedApps = run?.Options.CachedApps.ToDictionary(
+        var cachedApps = run.Options.CachedApps.ToDictionary(
             app => app.AppId, app => app.Revision, StringComparer.OrdinalIgnoreCase);
         var handler = new TactProductHandler(
             new ApiConsoleAdapter(progress), force, progress, settings, cachedApps);
@@ -521,7 +505,7 @@ public sealed class BattleNetPrefillApi : IDisposable
                     progress.OnAppCompleted(app, AppDownloadResult.Skipped);
                     continue;
                 }
-                run?.Hold(claim);
+                run.Hold(claim);
                 try
                 {
                     var failuresBefore = handler.Summary.FailedApps;
@@ -547,7 +531,6 @@ public sealed class BattleNetPrefillApi : IDisposable
                     else if (!settings.SkipDownloads)
                     {
                         updated++;
-                        if (run == null) { progress.OnAppCompleted(completedApp, AppDownloadResult.Success); }
                         foreach (var key in _downloadSizeCache.Keys.Where(key =>
                             key.StartsWith(product.ProductCode + "@", StringComparison.Ordinal)))
                         {
@@ -556,7 +539,7 @@ public sealed class BattleNetPrefillApi : IDisposable
                     }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested
-                    || run?.Progress.Terminal?.State == "cancelled")
+                    || run.Progress.Terminal?.State == "cancelled")
                 {
                     throw;
                 }
@@ -565,10 +548,6 @@ public sealed class BattleNetPrefillApi : IDisposable
                     failed++;
                     progress.OnLog(LogLevel.Warning, $"Prefill failed for {product.DisplayName}: {exception.Message}");
                     progress.OnAppCompleted(app, AppDownloadResult.Failed);
-                }
-                finally
-                {
-                    if (run == null) { claim.Dispose(); }
                 }
             }
             progress.OnPrefillCompleted(new PrefillSummary

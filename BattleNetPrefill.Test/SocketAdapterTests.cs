@@ -10,26 +10,34 @@ namespace BattleNetPrefill.Test;
 public sealed class SocketAdapterTests
 {
     [Fact]
-    public async Task LegacyPrefillRemainsExclusiveAgainstNewAndOldStarts()
+    public async Task APrefillWithoutProtocolVersionIsRefusedAsOutdated()
     {
         using var fixture = new ConcurrentPrefillTests.TactFixture();
         await using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
         await commands.StartAsync();
         await using var client = await FramedClient.ConnectAsync(commands.BoundTcpPort);
-        await client.SendAsync(new CommandRequest
+        await client.SendAsync(new CommandRequest { Id = "outdated", Type = "prefill" });
+        var response = await ConcurrentPrefillTests.ReadResponseAsync(client, "outdated");
+        Assert.False(response.GetProperty("success").GetBoolean());
+        Assert.Equal("daemon-outdated", response.GetProperty("errorCode").GetString());
+        await commands.StopAsync();
+    }
+
+    [Fact]
+    public async Task UnknownOperationAnswersWithTheTypedNotFoundCode()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        await using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
+        await commands.StartAsync();
+        await using var client = await FramedClient.ConnectAsync(commands.BoundTcpPort);
+        foreach (var type in new[] { "cancel-prefill", "get-operation" })
         {
-            Id = "legacy",
-            Type = "prefill",
-            Parameters = new Dictionary<string, string> { ["products"] = "[\"d3\"]" }
-        });
-        Assert.True((await ConcurrentPrefillTests.ReadResponseAsync(client, "legacy")).GetProperty("success").GetBoolean());
-        await fixture.Body("d3").Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var next = fixture.Start(Guid.NewGuid().ToString("D"), "s1");
-        await client.SendAsync(next);
-        Assert.Equal("run-limit", (await ConcurrentPrefillTests.ReadResponseAsync(client, next.Id)).GetProperty("error").GetString());
-        await client.SendAsync(new CommandRequest { Id = "legacy-2", Type = "prefill" });
-        Assert.False((await ConcurrentPrefillTests.ReadResponseAsync(client, "legacy-2")).GetProperty("success").GetBoolean());
-        fixture.Body("d3").Release.TrySetResult();
+            await client.SendAsync(fixture.Control(type, type, Guid.NewGuid().ToString("D")));
+            var response = await ConcurrentPrefillTests.ReadResponseAsync(client, type);
+            Assert.False(response.GetProperty("success").GetBoolean());
+            Assert.Equal("operation-not-found",
+                response.TryGetProperty("errorCode", out var code) ? code.GetString() : null);
+        }
         await commands.StopAsync();
     }
 
@@ -62,82 +70,6 @@ public sealed class SocketAdapterTests
         await second.SendAsync(fixture.Control("missing", "get-operation", Guid.NewGuid().ToString("D")));
         Assert.Equal("operation-not-found", (await ConcurrentPrefillTests.ReadResponseAsync(second, "missing")).GetProperty("error").GetString());
         await commands.StopAsync();
-    }
-
-    [Fact]
-    public async Task CancelPrefill_WaitsForCleanup_EmitsCancelled_AndAllowsNewStart()
-    {
-        var operationStarted = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var cancellationObserved = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseCleanup = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var invocationCount = 0;
-
-        async Task<PrefillResult> RunPrefillAsync(
-            PrefillOptions options,
-            CancellationToken cancellationToken)
-        {
-            if (Interlocked.Increment(ref invocationCount) > 1)
-            {
-                return new PrefillResult { Success = true };
-            }
-
-            operationStarted.TrySetResult();
-            try
-            {
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-                return new PrefillResult { Success = true };
-            }
-            finally
-            {
-                cancellationObserved.TrySetResult();
-                await releaseCleanup.Task;
-            }
-        }
-
-        await using var commandInterface = new SocketCommandInterface(0, RunPrefillAsync);
-        await commandInterface.StartAsync();
-        await using var client = await FramedClient.ConnectAsync(commandInterface.BoundTcpPort);
-
-        await client.SendAsync(new CommandRequest { Id = "prefill-1", Type = "prefill" });
-        Assert.True((await client.ReadAsync()).GetProperty("success").GetBoolean());
-        await operationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        await client.SendAsync(new CommandRequest { Id = "cancel-1", Type = "cancel-prefill" });
-        await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        var pendingMessage = client.ReadAsync();
-        await Task.Delay(100);
-        Assert.False(pendingMessage.IsCompleted);
-
-        releaseCleanup.TrySetResult();
-        var messages = new[]
-        {
-            await pendingMessage.WaitAsync(TimeSpan.FromSeconds(2)),
-            await client.ReadAsync().WaitAsync(TimeSpan.FromSeconds(2))
-        };
-
-        Assert.Contains(messages, message =>
-            message.TryGetProperty("id", out var id) &&
-            id.GetString() == "cancel-1" &&
-            message.GetProperty("success").GetBoolean());
-        Assert.Contains(messages, message =>
-            message.TryGetProperty("type", out var type) &&
-            type.GetString() == "progress" &&
-            message.GetProperty("data").GetProperty("state").GetString() == "cancelled");
-        Assert.DoesNotContain(messages, message =>
-            message.TryGetProperty("data", out var data) &&
-            data.TryGetProperty("state", out var state) &&
-            state.GetString() is "completed" or "error");
-
-        await client.SendAsync(new CommandRequest { Id = "prefill-2", Type = "prefill" });
-        var secondStart = await client.ReadAsync().WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.Equal("prefill-2", secondStart.GetProperty("id").GetString());
-        Assert.True(secondStart.GetProperty("success").GetBoolean());
-
-        await commandInterface.StopAsync();
     }
 
     [Fact]
