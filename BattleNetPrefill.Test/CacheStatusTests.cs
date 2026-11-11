@@ -136,7 +136,7 @@ public sealed class CacheStatusTests
         Assert.Equal(CacheReason.DeadlineReached, result.Apps[1].Reason);
         Assert.Equal(CacheReason.DeadlineReached, result.Apps[2].Reason);
         Assert.Equal(2, revisions.VersionsRequests);
-        await revisions.HeldCancelled.WaitAsync(TimeSpan.FromSeconds(5));
+        await revisions.HeldCanceled.WaitAsync(TimeSpan.FromSeconds(5));
         await revisions.HeldDisposed.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
@@ -166,7 +166,7 @@ public sealed class CacheStatusTests
         clock.Advance(TimeSpan.FromSeconds(8));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await pending);
-        await revisions.HeldCancelled.WaitAsync(TimeSpan.FromSeconds(5));
+        await revisions.HeldCanceled.WaitAsync(TimeSpan.FromSeconds(5));
         await revisions.HeldDisposed.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
@@ -262,7 +262,7 @@ public sealed class CacheStatusTests
         Assert.False(response.GetProperty("data").TryGetProperty("message", out _));
         Assert.Equal("Current", apps[0].GetProperty("outcome").GetString());
         Assert.Equal("DeadlineReached", apps[1].GetProperty("reason").GetString());
-        await revisions.HeldCancelled.WaitAsync(TimeSpan.FromSeconds(5));
+        await revisions.HeldCanceled.WaitAsync(TimeSpan.FromSeconds(5));
         await revisions.HeldDisposed.WaitAsync(TimeSpan.FromSeconds(5));
 
         await client.SendAsync(new CommandRequest { Id = "still-open", Type = "status" });
@@ -398,7 +398,7 @@ public sealed class CacheStatusTests
         internal int VersionsRequests => Volatile.Read(ref _versionsRequests);
         internal int CdnRequests => Volatile.Read(ref _cdnRequests);
         internal Task HeldEntered => HeldStream.Entered.Task;
-        internal Task HeldCancelled => HeldStream.Cancelled.Task;
+        internal Task HeldCanceled => HeldStream.Canceled.Task;
         internal Task HeldDisposed => HeldStream.Disposed.Task;
         private HeldBody HeldStream { get; } = new();
 
@@ -443,7 +443,7 @@ public sealed class CacheStatusTests
     {
         internal TaskCompletionSource Entered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal TaskCompletionSource Cancelled { get; } =
+        internal TaskCompletionSource Canceled { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource Disposed { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -470,7 +470,7 @@ public sealed class CacheStatusTests
             }
             catch (OperationCanceledException)
             {
-                Cancelled.TrySetResult();
+                Canceled.TrySetResult();
                 throw;
             }
         }

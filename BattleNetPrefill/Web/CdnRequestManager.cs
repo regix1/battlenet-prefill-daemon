@@ -299,7 +299,7 @@ namespace BattleNetPrefill.Web
                 });
             }
 
-            // Final 100% report so the UI lands on full completion (only when nothing failed and not cancelled).
+            // Final 100% report so the UI lands on full completion (only when nothing failed and not canceled).
             if (!failedRequests.Any() && !cancellationToken.IsCancellationRequested)
             {
                 var finalElapsed = downloadTimer.Elapsed;

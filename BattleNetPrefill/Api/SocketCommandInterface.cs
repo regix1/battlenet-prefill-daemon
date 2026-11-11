@@ -133,76 +133,23 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         }
     }
 
-    private async Task<CommandResponse> HandleCancelPrefillAsync(
+    private Task<CommandResponse> HandleCancelPrefillAsync(
         CommandRequest request,
         CancellationToken cancellationToken)
     {
-        if (request.Parameters?.TryGetValue("operationId", out var operationId) == true)
-        {
-            var instance = request.Parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty;
-            _protocol.ValidateInstance(instance);
-            var operation = Cancel(operationId);
-            return new CommandResponse
-            {
-                Id = request.Id,
-                Success = operation != null,
-                Data = operation,
-                Error = operation == null ? "operation-not-found" : null,
-                ErrorCode = operation == null ? "operation-not-found" : null
-            };
-        }
-        if (!_prefillOperation.IsRunning)
-        {
-            return new CommandResponse
-            {
-                Id = request.Id,
-                Success = true,
-                Message = "No prefill in progress",
-                CompletedAt = DateTime.UtcNow
-            };
-        }
-
-        _progress.OnLog(LogLevel.Info, "Cancelling prefill...");
-        var active = _prefillOperation.GetActiveOperations();
-        OwnedOperationResult result;
-        if (active.Count == 1)
-        {
-            Cancel(active[0].OperationId);
-            result = await _prefillOperation.WaitAsync(active[0].OperationId, cancellationToken);
-        }
-        else
-        {
-            result = await _prefillOperation.CancelAndWaitAsync(cancellationToken);
-        }
-        if (result.Status == OwnedOperationStatus.Failed)
-        {
-            return new CommandResponse
-            {
-                Id = request.Id,
-                Success = false,
-                Error = result.Exception?.Message ?? "Prefill failed while cancellation was in progress",
-                CompletedAt = DateTime.UtcNow
-            };
-        }
-
-        if (_prefillOperation.IsRunning || _api.IsPrefilling)
-        {
-            return new CommandResponse
-            {
-                Id = request.Id,
-                Success = false,
-                Error = "Prefill did not stop cleanly",
-                CompletedAt = DateTime.UtcNow
-            };
-        }
-
-        return new CommandResponse
+        var operationId = request.Parameters?.GetValueOrDefault("operationId")
+            ?? throw new ArgumentException("operationId is required.");
+        var instance = request.Parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty;
+        _protocol.ValidateInstance(instance);
+        var operation = Cancel(operationId);
+        return Task.FromResult(new CommandResponse
         {
             Id = request.Id,
-            Success = true,
-            Message = result.Status == OwnedOperationStatus.Idle ? "No prefill in progress" : "Prefill cancelled",
-            CompletedAt = DateTime.UtcNow
-        };
+            Success = operation != null,
+            Data = operation,
+            Error = operation == null ? "operation-not-found" : null,
+            ErrorCode = operation == null ? "operation-not-found" : null
+        });
     }
 
     private CommandResponse HandleStatus(CommandRequest request)
@@ -248,14 +195,14 @@ public sealed class SocketCommandInterface : IAsyncDisposable
     private Task PublishAsync(RunSnapshot snapshot, CancellationToken cancellationToken)
     {
         var item = snapshot.CurrentItem;
-        var terminal = snapshot.State is "completed" or "failed" or "cancelled";
+        var terminal = snapshot.State is "completed" or "failed" or "canceled";
         var update = new PrefillProgressUpdate
         {
             OperationId = snapshot.OperationId,
             DaemonInstanceId = snapshot.DaemonInstanceId,
             Sequence = snapshot.Sequence,
             Operation = snapshot,
-            State = terminal || snapshot.State == "cancelling" ? snapshot.State
+            State = terminal || snapshot.State == "canceling" ? snapshot.State
                 : item?.Result != null ? "app_completed" : item?.State ?? "preparing",
             CurrentAppId = item?.AppId,
             CurrentAppName = item?.Name,
@@ -270,7 +217,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
             AlreadyUpToDate = snapshot.CachedApps,
             FailedApps = snapshot.FailedApps,
             SkippedApps = snapshot.SkippedApps,
-            CancelledApps = snapshot.CancelledApps,
+            CanceledApps = snapshot.CanceledApps,
             UpdatedAt = snapshot.UpdatedAt.UtcDateTime,
             TotalTime = snapshot.UpdatedAt - snapshot.StartedAt
         };
@@ -403,6 +350,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
             Id = request.Id,
             Success = admission.Accepted,
             Error = admission.Error,
+            ErrorCode = admission.Error,
             Data = admission.Accepted
                 ? new PrefillStart(true, request.Id, _protocol.DaemonInstanceId,
                     admission.Replayed ? admission.Operation!.State : "started")

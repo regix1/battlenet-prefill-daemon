@@ -58,7 +58,7 @@
         };
         public static readonly TactProduct WowClassic = new TactProduct("wow_classic")
         {
-            DisplayName = "WoW Cataclysm Classic",
+            DisplayName = "WoW Mists of Pandaria Classic",
             DefaultTags = new[] { "Windows", "enUS", "x86_64", "US" },
             IsBlizzard = true
         };
@@ -66,6 +66,20 @@
         public static readonly TactProduct WowClassicEra = new TactProduct("wow_classic_era")
         {
             DisplayName = "WoW Classic",
+            DefaultTags = new[] { "Windows", "enUS", "x86_64", "US" },
+            IsBlizzard = true
+        };
+
+        public static readonly TactProduct WowForever = new TactProduct("wowf")
+        {
+            DisplayName = "World of Warcraft: Forever",
+            DefaultTags = new[] { "Windows", "enUS", "x86_64", "US" },
+            IsBlizzard = true
+        };
+
+        public static readonly TactProduct WowAnniversary = new TactProduct("wow_anniversary")
+        {
+            DisplayName = "Burning Crusade Anniversary",
             DefaultTags = new[] { "Windows", "enUS", "x86_64", "US" },
             IsBlizzard = true
         };
@@ -97,12 +111,23 @@
             IsActivision = true
         };
 
+        public static readonly TactProduct TonyHawksProSkater3And4 = new TactProduct("lbra") { DisplayName = "Tony Hawk's Pro Skater 3 + 4", IsActivision = true };
+
         #endregion
 
         #region Microsoft
 
         public static readonly TactProduct Avowed = new TactProduct("aqua") { DisplayName = "Avowed", IsMicrosoft = true };
+        public static readonly TactProduct DoomTheDarkAges = new TactProduct("aris") { DisplayName = "DOOM: The Dark Ages", DefaultTags = new[] { "_reserved_" }, IsMicrosoft = true };
+        public static readonly TactProduct OuterWorlds2 = new TactProduct("ark") { DisplayName = "The Outer Worlds 2", IsMicrosoft = true };
         public static readonly TactProduct SeaOfThieves = new TactProduct("scor") { DisplayName = "Sea of Thieves", IsMicrosoft = true };
+
+        #endregion
+
+        #region CD Projekt Red
+
+        public static readonly TactProduct Witcher3Remastered = new TactProduct("lyra") { DisplayName = "The Witcher 3: Wild Hunt — Remastered" };
+        public static readonly TactProduct Cyberpunk2077 = new TactProduct("malb") { DisplayName = "Cyberpunk 2077" };
 
         #endregion
 

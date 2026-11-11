@@ -67,24 +67,26 @@ public sealed class ConcurrentPrefillTests
 
         var excess = Guid.NewGuid().ToString("D");
         await client.SendAsync(fixture.Start(excess, "s2"));
-        Assert.Equal("run-limit", (await ReadResponseAsync(client, excess)).GetProperty("error").GetString());
+        var refused = await ReadResponseAsync(client, excess);
+        Assert.Equal("run-limit", refused.GetProperty("error").GetString());
+        Assert.Equal("run-limit", refused.GetProperty("errorCode").GetString());
 
-        await client.SendAsync(new CommandRequest { Id = "ambiguous", Type = "cancel-prefill" });
-        Assert.Equal("ambiguous-operation", (await ReadResponseAsync(client, "ambiguous")).GetProperty("error").GetString());
-        Assert.All(products, product => Assert.False(fixture.Body(product).Cancelled.Task.IsCompleted));
+        await client.SendAsync(new CommandRequest { Id = "unkeyed", Type = "cancel-prefill" });
+        Assert.False((await ReadResponseAsync(client, "unkeyed")).GetProperty("success").GetBoolean());
+        Assert.All(products, product => Assert.False(fixture.Body(product).Canceled.Task.IsCompleted));
 
         await client.SendAsync(fixture.Control("wrong", "cancel-prefill", ids[0], "wrong-instance"));
         Assert.Equal("instance-changed", (await ReadResponseAsync(client, "wrong")).GetProperty("error").GetString());
         await client.SendAsync(fixture.Control("cancel", "cancel-prefill", ids[0]));
         Assert.True((await ReadResponseAsync(client, "cancel")).GetProperty("success").GetBoolean());
-        await fixture.Body(products[0]).Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await fixture.Body(products[0]).Canceled.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         var size = new TactProductHandler(new ApiConsoleAdapter(NullProgress.Instance), false, NullProgress.Instance,
             fixture.Settings with { OperationId = Guid.NewGuid().ToString("D") });
         Assert.Equal(8, await size.GetProductDownloadSizeAsync(TactProduct.Starcraft2).WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.False(File.Exists(Path.Combine(fixture.Directory, "prefilledVersion-s2.txt")));
-        Assert.False(fixture.Body(products[1]).Cancelled.Task.IsCompleted);
-        Assert.False(fixture.Body(products[2]).Cancelled.Task.IsCompleted);
+        Assert.False(fixture.Body(products[1]).Canceled.Task.IsCompleted);
+        Assert.False(fixture.Body(products[2]).Canceled.Task.IsCompleted);
         fixture.Body(products[1]).Release.TrySetResult();
         fixture.Body(products[2]).Release.TrySetResult();
 
@@ -99,7 +101,7 @@ public sealed class ConcurrentPrefillTests
                 terminal[operation.GetProperty("operationId").GetString()!] = operation.Clone();
             if (terminal.Count != 3) { await Task.Yield(); }
         }
-        Assert.Equal("cancelled", terminal[ids[0]].GetProperty("state").GetString());
+        Assert.Equal("canceled", terminal[ids[0]].GetProperty("state").GetString());
         Assert.Equal(2, terminal[ids[0]].GetProperty("bytesTransferred").GetInt64());
         foreach (var id in ids.Skip(1))
         {
@@ -118,7 +120,9 @@ public sealed class ConcurrentPrefillTests
         Assert.True((await ReadResponseAsync(client, ids[1])).GetProperty("success").GetBoolean());
         Assert.Equal(before, fixture.ContentRequests);
         await client.SendAsync(fixture.Start(ids[1], products[2]));
-        Assert.Equal("operation-conflict", (await ReadResponseAsync(client, ids[1])).GetProperty("error").GetString());
+        var conflict = await ReadResponseAsync(client, ids[1]);
+        Assert.Equal("operation-conflict", conflict.GetProperty("error").GetString());
+        Assert.Equal("operation-conflict", conflict.GetProperty("errorCode").GetString());
         await commands.StopAsync();
     }
 
@@ -284,7 +288,7 @@ public sealed class ConcurrentPrefillTests
                 if (_position != 0)
                 {
                     try { await body.Release.Task.WaitAsync(cancellationToken); }
-                    catch (OperationCanceledException) { body.Cancelled.TrySetResult(); throw; }
+                    catch (OperationCanceledException) { body.Canceled.TrySetResult(); throw; }
                 }
                 var count = _position == 0 ? Math.Min(2, buffer.Length) : (int)Math.Min(length - _position, buffer.Length);
                 buffer.Span[..count].Clear();

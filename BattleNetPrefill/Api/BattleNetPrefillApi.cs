@@ -539,7 +539,7 @@ public sealed class BattleNetPrefillApi : IDisposable
                     }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested
-                    || run.Progress.Terminal?.State == "cancelled")
+                    || run.Progress.Terminal?.State == "canceled")
                 {
                     throw;
                 }

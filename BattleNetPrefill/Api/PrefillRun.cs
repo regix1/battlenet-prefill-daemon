@@ -45,15 +45,15 @@ internal sealed class PrefillRun : IPrefillProgress
 
     internal async Task ExecuteAsync(BattleNetPrefillApi api, CancellationToken cancellationToken)
     {
-        using var cancellation = cancellationToken.Register(() => Progress.TryChooseTerminal("cancelled"));
+        using var cancellation = cancellationToken.Register(() => Progress.TryChooseTerminal("canceled"));
         try
         {
             var result = await api.PrefillAsync(this, cancellationToken);
             Progress.TryChooseTerminal(result.Success ? "completed" : "failed", result.Success ? null : "download-failed");
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || Progress.Terminal?.State == "cancelled")
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || Progress.Terminal?.State == "canceled")
         {
-            Progress.TryChooseTerminal("cancelled");
+            Progress.TryChooseTerminal("canceled");
             throw;
         }
         catch (Exception)

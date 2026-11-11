@@ -8,8 +8,6 @@ public sealed class PrefillRunTests
     [Theory]
     [InlineData(true, "targeted")]
     [InlineData(false, "targeted")]
-    [InlineData(true, "unkeyed")]
-    [InlineData(false, "unkeyed")]
     [InlineData(true, "all")]
     [InlineData(false, "all")]
     [InlineData(true, "process")]
@@ -67,9 +65,6 @@ public sealed class PrefillRunTests
                     case "targeted":
                         owner.Cancel(id, fixture.Protocol.DaemonInstanceId);
                         break;
-                    case "unkeyed":
-                        await owner.CancelAndWaitAsync();
-                        break;
                     case "all":
                         await owner.CancelAllAndWaitAsync();
                         break;
@@ -83,10 +78,10 @@ public sealed class PrefillRunTests
             await cancellationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             if (cancelFirst) { await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
             release.TrySetResult();
-            await Task.WhenAll(cancel, owner.WaitAsync(id)).WaitAsync(TimeSpan.FromSeconds(10));
+            await Task.WhenAll(cancel, owner.WaitAsync()).WaitAsync(TimeSpan.FromSeconds(10));
             var item = Assert.Single(run.Progress.GetPage(0, 100).Items);
             Assert.Equal(cancelFirst ? 0 : 1, writes);
-            Assert.Equal(cancelFirst ? "cancelled" : "success", item.Result);
+            Assert.Equal(cancelFirst ? "canceled" : "success", item.Result);
             Assert.Equal(cancelFirst ? null : "fixture-version", item.CacheRevision);
             Assert.Equal(cancelFirst ? "previous-version" : "fixture-version", await File.ReadAllTextAsync(path));
             Assert.Equal(8, item.BytesTransferred);

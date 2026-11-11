@@ -91,7 +91,7 @@ public class PrefillProgressUpdate
     public long Sequence { get; init; }
     public string? Reason { get; init; }
     public int SkippedApps { get; init; }
-    public int CancelledApps { get; init; }
+    public int CanceledApps { get; init; }
     public RunSnapshot? Operation { get; init; }
     [System.Text.Json.Serialization.JsonPropertyName("state")]
     public string State { get; set; } = "idle";

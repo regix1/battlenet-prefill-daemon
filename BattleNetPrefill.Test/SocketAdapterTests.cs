@@ -42,7 +42,7 @@ public sealed class SocketAdapterTests
     }
 
     [Fact]
-    public async Task AcceptedRunSurvivesLostAcknowledgementAndReconnect()
+    public async Task AcceptedRunSurvivesLostAcknowledgmentAndReconnect()
     {
         using var fixture = new ConcurrentPrefillTests.TactFixture();
         await using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
@@ -62,11 +62,18 @@ public sealed class SocketAdapterTests
         Assert.Equal(6, status.GetProperty("features").GetArrayLength());
         Assert.Contains(status.GetProperty("features").EnumerateArray(),
             feature => feature.GetString() == "cacheStatusV2");
-        await second.SendAsync(new CommandRequest { Id = "single-cancel", Type = "cancel-prefill" });
-        Assert.True((await ConcurrentPrefillTests.ReadResponseAsync(second, "single-cancel")).GetProperty("success").GetBoolean());
+        await second.SendAsync(new CommandRequest { Id = "unkeyed-cancel", Type = "cancel-prefill" });
+        Assert.False((await ConcurrentPrefillTests.ReadResponseAsync(second, "unkeyed-cancel")).GetProperty("success").GetBoolean());
         Assert.Equal(1, fixture.ContentRequests);
-        await second.SendAsync(fixture.Control("repeat", "cancel-prefill", id));
-        Assert.Equal("cancelled", (await ConcurrentPrefillTests.ReadResponseAsync(second, "repeat")).GetProperty("data").GetProperty("state").GetString());
+        using var settled = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        string? state = null;
+        while (state != "canceled")
+        {
+            settled.Token.ThrowIfCancellationRequested();
+            await second.SendAsync(fixture.Control("repeat", "cancel-prefill", id));
+            state = (await ConcurrentPrefillTests.ReadResponseAsync(second, "repeat")).GetProperty("data").GetProperty("state").GetString();
+            if (state != "canceled") { await Task.Yield(); }
+        }
         await second.SendAsync(fixture.Control("missing", "get-operation", Guid.NewGuid().ToString("D")));
         Assert.Equal("operation-not-found", (await ConcurrentPrefillTests.ReadResponseAsync(second, "missing")).GetProperty("error").GetString());
         await commands.StopAsync();
