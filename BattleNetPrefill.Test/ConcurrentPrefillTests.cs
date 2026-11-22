@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using BattleNetPrefill.Api;
@@ -13,6 +14,106 @@ namespace BattleNetPrefill.Test;
 
 public sealed class ConcurrentPrefillTests
 {
+    // Every run sends its start request to the resolved LANCache address. The resolver keeps its first answer for
+    // the whole process, so the address must be set before any test resolves; an IP literal skips DNS detection.
+    // The start request always goes to port 80, so a loopback address would reach any local web server. No TCP
+    // connection can be made to the limited-broadcast address, so the send fails on every machine.
+#pragma warning disable CA2255 // The test assembly needs the address in place before its first test runs.
+    [ModuleInitializer]
+    internal static void UseUnreachableLancache()
+    {
+        Environment.SetEnvironmentVariable("LANCACHE_IP", "255.255.255.255");
+    }
+#pragma warning restore CA2255
+
+    [Fact]
+    public async Task OneRunUsesMoreThanTwentyFiveRequestsWhenItsLimitAllows()
+    {
+        using var fixture = new TactFixture(64);
+        using var manager = new CdnRequestManager(new ApiConsoleAdapter(NullProgress.Instance),
+            fixture.Settings with { OperationId = "d3", MaxConcurrency = 64 }, NullProgress.Instance);
+        try
+        {
+            await manager.InitializeAsync(TactProduct.Diablo3);
+            for (var i = 20; i < 80; i++)
+                manager.QueueRequest(RootFolder.data, new MD5Hash((ulong)i, (ulong)i + 1),
+                    0, i % 2 == 0 ? 4095 : 1048575);
+            var download = manager.DownloadQueuedRequestsAsync(new PrefillSummaryResult());
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            while (fixture.PeakBodies <= 25 && !deadline.IsCancellationRequested) { await Task.Delay(10); }
+            Assert.True(fixture.PeakBodies > 25, $"Peak requests in flight: {fixture.PeakBodies}");
+            fixture.Body("d3").Release.TrySetResult();
+            Assert.True(await download.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+        finally
+        {
+            fixture.Body("d3").Release.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task ChangeConcurrencyAnswersLikeCancelAndRaisesTheActiveRunsLimit()
+    {
+        using var fixture = new TactFixture();
+        await using var commands = new SocketCommandInterface(0, fixture.Protocol, fixture.Settings);
+        await commands.StartAsync();
+        await using var client = await SocketAdapterTests.FramedClient.ConnectAsync(commands.BoundTcpPort);
+        var id = Guid.NewGuid().ToString("D");
+        await client.SendAsync(fixture.Start(id, "d3"));
+        Assert.True((await ReadResponseAsync(client, id)).GetProperty("success").GetBoolean());
+        await fixture.Body("d3").Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await client.SendAsync(ChangeConcurrency(fixture.Control("change", "change-concurrency", id), "2"));
+        var changed = await ReadResponseAsync(client, "change");
+        Assert.True(changed.GetProperty("success").GetBoolean());
+        Assert.Equal(id, changed.GetProperty("data").GetProperty("operationId").GetString());
+        Assert.Equal(2, fixture.Budget.LimitFor(id));
+
+        await client.SendAsync(ChangeConcurrency(
+            fixture.Control("unknown", "change-concurrency", Guid.NewGuid().ToString("D")), "2"));
+        var unknown = await ReadResponseAsync(client, "unknown");
+        Assert.Equal("operation-not-found", unknown.GetProperty("error").GetString());
+        Assert.Equal("operation-not-found", unknown.GetProperty("errorCode").GetString());
+        await client.SendAsync(ChangeConcurrency(
+            fixture.Control("wrong", "change-concurrency", id, "wrong-instance"), "2"));
+        Assert.Equal("instance-changed", (await ReadResponseAsync(client, "wrong")).GetProperty("error").GetString());
+        await client.SendAsync(ChangeConcurrency(fixture.Control("zero", "change-concurrency", id), "0"));
+        Assert.False((await ReadResponseAsync(client, "zero")).GetProperty("success").GetBoolean());
+        Assert.Equal(2, fixture.Budget.LimitFor(id));
+
+        await client.SendAsync(new CommandRequest { Id = "status", Type = "status" });
+        var features = (await ReadResponseAsync(client, "status")).GetProperty("data").GetProperty("features")
+            .EnumerateArray().Select(feature => feature.GetString()).ToArray();
+        Assert.Contains("changeConcurrency", features);
+        Assert.Contains("addressProbe", features);
+        fixture.Body("d3").Release.TrySetResult();
+        await commands.StopAsync();
+    }
+
+    [Fact]
+    public async Task RunSendsOneStartRequestAndGoesOnWhenItCannotBeSent()
+    {
+        using var fixture = new TactFixture();
+        fixture.Body("d3").Release.TrySetResult();
+        using var api = new BattleNetPrefillApi(NullProgress.Instance, fixture.Settings);
+        await api.InitializeAsync();
+        var log = new CacheStatusTests.RecordingProgress();
+        var run = new PrefillRun(Guid.NewGuid().ToString("D"), fixture.Protocol,
+            fixture.Protocol.Capture(new RunOptions { AppIds = ["d3"], MaxConcurrency = 1, Force = true }), log);
+
+        await run.ExecuteAsync(api, CancellationToken.None);
+
+        Assert.Single(log.Lines, line => line.Contains("Could not send the start request", StringComparison.Ordinal));
+        Assert.Equal("completed", run.Progress.Snapshot.State);
+        Assert.Equal("success", Assert.Single(run.Progress.GetPage(0, 10).Items).Result);
+    }
+
+    private static CommandRequest ChangeConcurrency(CommandRequest request, string maxConcurrency)
+    {
+        request.Parameters!["maxConcurrency"] = maxConcurrency;
+        return request;
+    }
+
     [Fact]
     public async Task SmallAndLargeQueuesShareTheDefaultTwentyFiveBodyBudget()
     {

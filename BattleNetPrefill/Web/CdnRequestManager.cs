@@ -70,7 +70,7 @@ namespace BattleNetPrefill.Web
 
         private readonly List<string> _cdnList = new List<string>
         {
-            "level3.blizzard.com",  // Level3
+            AppConfig.BattleNetTriggerDomain,  // Level3
             "cdn.blizzard.com",     // Official region-less CDN - Slow downloads
             "us.cdn.blizzard.com"
         };
@@ -368,11 +368,13 @@ namespace BattleNetPrefill.Web
             // requests from choking out overall throughput.
             var byteThreshold = (long)ByteSize.FromMegaBytes(1).Bytes;
 
+            // The request budget limits requests in flight to the run's current limit; fixed pools of 15 and 10 capped
+            // every run at 25 whatever its limit, so each pool is sized to the process ceiling.
             var smallRequests = requests.Where(e => e.TotalBytes < byteThreshold).ToList();
-            var smallDownloadTask = Parallel.ForEachAsync(smallRequests, new ParallelOptions { MaxDegreeOfParallelism = 15, CancellationToken = cancellationToken }, async (request, ct) => await DownloadRequestWrapper(request, ct));
+            var smallDownloadTask = Parallel.ForEachAsync(smallRequests, new ParallelOptions { MaxDegreeOfParallelism = _settings.Budget.MaxConcurrentRequests, CancellationToken = cancellationToken }, async (request, ct) => await DownloadRequestWrapper(request, ct));
 
             var largeRequests = requests.Where(e => e.TotalBytes >= byteThreshold).ToList();
-            var largeDownloadTask = Parallel.ForEachAsync(largeRequests, new ParallelOptions { MaxDegreeOfParallelism = 10, CancellationToken = cancellationToken }, async (request, ct) => await DownloadRequestWrapper(request, ct));
+            var largeDownloadTask = Parallel.ForEachAsync(largeRequests, new ParallelOptions { MaxDegreeOfParallelism = _settings.Budget.MaxConcurrentRequests, CancellationToken = cancellationToken }, async (request, ct) => await DownloadRequestWrapper(request, ct));
 
             await Task.WhenAll(smallDownloadTask, largeDownloadTask);
 
@@ -390,6 +392,15 @@ namespace BattleNetPrefill.Web
 
                 try
                 {
+                    using var permit = await _settings.Budget.AcquireAsync(_settings.OperationId, _settings.MaxConcurrency, ct);
+
+                    // The pool is wider than the run's limit, so a worker can wait out both waves for its permit.
+                    if (Volatile.Read(ref sourceIsDown) != 0)
+                    {
+                        failedRequests.Add(request);
+                        return;
+                    }
+
                     await DownloadRequestAsync(request, ct, forceRecache);
                     Interlocked.Increment(ref succeededCount);
                 }
@@ -557,7 +568,6 @@ namespace BattleNetPrefill.Web
                 requestMessage.Headers.Range = new RangeHeaderValue(request.LowerByteRange, request.UpperByteRange);
             }
 
-            using var permit = await _settings.Budget.AcquireAsync(_settings.OperationId, _settings.MaxConcurrency, cancellationToken);
             using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             requestCancellation.CancelAfter(ResponseBodyTimeout);
             try

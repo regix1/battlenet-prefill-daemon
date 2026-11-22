@@ -59,7 +59,7 @@ public sealed class SocketAdapterTests
         Assert.Equal(id, status.GetProperty("activeOperations")[0].GetProperty("operationId").GetString());
         Assert.True(status.GetProperty("isLoggedIn").GetBoolean());
         Assert.Equal(2, status.GetProperty("protocolVersion").GetInt32());
-        Assert.Equal(6, status.GetProperty("features").GetArrayLength());
+        Assert.Equal(8, status.GetProperty("features").GetArrayLength());
         Assert.Contains(status.GetProperty("features").EnumerateArray(),
             feature => feature.GetString() == "cacheStatusV2");
         await second.SendAsync(new CommandRequest { Id = "unkeyed-cancel", Type = "cancel-prefill" });

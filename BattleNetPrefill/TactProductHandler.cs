@@ -62,37 +62,6 @@ namespace BattleNetPrefill
             return (long)handler.Summary.TotalBytesTransferred.Bytes;
         }
 
-        public async Task ProcessMultipleProductsAsync(
-            List<TactProduct> productsToProcess,
-            CancellationToken cancellationToken = default)
-        {
-            var timer = Stopwatch.StartNew();
-
-            var distinctProducts = productsToProcess.Distinct().ToList();
-            _ansiConsole.LogMarkupLine($"Prefilling {LightYellow(productsToProcess.Count)} products \n");
-            foreach (var productCode in distinctProducts)
-            {
-                try
-                {
-                    await ProcessProductAsync(productCode, cancellationToken);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception e)
-                {
-                    // Need to catch any exceptions that might happen during a single download, so that the other apps won't be affected
-                    _ansiConsole.LogMarkupLine(Red($"Unexpected download error : {e.Message}  Skipping app..."));
-                    _ansiConsole.MarkupLine("");
-                    _prefillSummaryResult.FailedApps++;
-                }
-            }
-
-            _ansiConsole.LogMarkupLine($"Prefill complete! Prefilled {Magenta(distinctProducts.Count)} apps", timer);
-            _prefillSummaryResult.RenderSummaryTable(_ansiConsole);
-        }
-
         /// <summary>
         /// Downloads a specified game, in the same manner that Battle.net does.  Should be used to pre-fill a LanCache with game data from Blizzard's CDN.
         /// </summary>

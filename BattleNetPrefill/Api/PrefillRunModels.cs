@@ -167,7 +167,6 @@ public class AppDownloadInfo
     public string AppId { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public long TotalBytes { get; init; }
-    public int ChunkCount { get; init; }
     public string? CacheRevision { get; init; }
 }
 

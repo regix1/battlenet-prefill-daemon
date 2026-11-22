@@ -350,6 +350,108 @@ public sealed class CacheStatusTests
         await commands.StopAsync();
     }
 
+    [Fact]
+    public async Task SelectedStatusLeavesOutAnAppTheManagerHoldsAtTheCurrentVersion()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        using var api = new BattleNetPrefillApi(NullProgress.Instance, fixture.Settings);
+        await api.InitializeAsync();
+        api.SetSelectedApps(["d3", "s1"]);
+
+        var status = await api.GetSelectedAppsStatusAsync(
+            [new CachedAppInput { AppId = "d3", Revision = "fixture-version" }]);
+
+        Assert.True(status.Apps[0].IsUpToDate);
+        Assert.Equal(0, status.Apps[0].DownloadSize);
+        Assert.False(status.Apps[1].IsUpToDate);
+        Assert.True(status.Apps[1].DownloadSize > 0);
+        Assert.Equal(status.Apps[1].DownloadSize, status.TotalDownloadSize);
+    }
+
+    [Fact]
+    public async Task SelectedStatusCountsAMarkedAppWhenTheManagerHoldsNoRecord()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        await File.WriteAllTextAsync(Path.Combine(fixture.Directory, "prefilledVersion-d3.txt"), "fixture-version");
+        using var api = new BattleNetPrefillApi(NullProgress.Instance, fixture.Settings);
+        await api.InitializeAsync();
+        api.SetSelectedApps(["d3"]);
+
+        var status = await api.GetSelectedAppsStatusAsync([]);
+
+        var app = Assert.Single(status.Apps);
+        Assert.False(app.IsUpToDate);
+        Assert.True(app.DownloadSize > 0);
+        Assert.Equal(app.DownloadSize, status.TotalDownloadSize);
+    }
+
+    [Fact]
+    public async Task SelectedStatusWithoutAManagerListUsesTheMarker()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        using var revisions = new RevisionHttp();
+        await File.WriteAllTextAsync(Path.Combine(fixture.Directory, "prefilledVersion-d3.txt"), "fixture-version");
+        using var api = new BattleNetPrefillApi(NullProgress.Instance, WithRevisions(fixture, revisions));
+        await api.InitializeAsync();
+        api.SetSelectedApps(["d3"]);
+
+        var status = await api.GetSelectedAppsStatusAsync(null);
+
+        var app = Assert.Single(status.Apps);
+        Assert.True(app.IsUpToDate);
+        Assert.Equal(0, status.TotalDownloadSize);
+        Assert.Equal(0, revisions.VersionsRequests);
+    }
+
+    [Fact]
+    public async Task SelectedStatusCountsAnAppWhoseVersionCannotBeRead()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        using var revisions = new RevisionHttp(new Dictionary<string, RevisionReply>
+        {
+            ["d3"] = RevisionReply.Malformed
+        });
+        await File.WriteAllTextAsync(Path.Combine(fixture.Directory, "prefilledVersion-d3.txt"), "fixture-version");
+        var log = new RecordingProgress();
+        using var api = new BattleNetPrefillApi(log, WithRevisions(fixture, revisions));
+        await api.InitializeAsync();
+        api.SetSelectedApps(["d3", "s1"]);
+
+        var status = await api.GetSelectedAppsStatusAsync(
+            [new CachedAppInput { AppId = "d3", Revision = "fixture-version" }]);
+
+        Assert.Equal(new[] { "d3", "s1" }, status.Apps.Select(app => app.AppId));
+        Assert.False(status.Apps[0].IsUpToDate);
+        Assert.Contains(log.Lines, line => line.StartsWith(
+            "Failed to read the current version for " + TactProduct.Diablo3.DisplayName + ":",
+            StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SelectedStatusCountsAnUnknownIdWithoutAVersionRequest()
+    {
+        using var fixture = new ConcurrentPrefillTests.TactFixture();
+        using var revisions = new RevisionHttp();
+        await File.WriteAllTextAsync(Path.Combine(fixture.Directory, "prefilledVersion-zzz.txt"), "fixture-version");
+        using var api = new BattleNetPrefillApi(NullProgress.Instance, WithRevisions(fixture, revisions));
+        await api.InitializeAsync();
+        api.SetSelectedApps(["zzz"]);
+
+        var status = await api.GetSelectedAppsStatusAsync([]);
+
+        var app = Assert.Single(status.Apps);
+        Assert.False(app.IsUpToDate);
+        Assert.Equal(0, app.DownloadSize);
+        Assert.Equal(0, revisions.VersionsRequests);
+    }
+
+    internal sealed class RecordingProgress : NullProgress, IPrefillProgress
+    {
+        internal System.Collections.Concurrent.ConcurrentQueue<string> Lines { get; } = new();
+
+        public new void OnLog(LogLevel level, string message) => Lines.Enqueue(message);
+    }
+
     private static PrefillSettings WithRevisions(
         ConcurrentPrefillTests.TactFixture fixture,
         RevisionHttp revisions)

@@ -26,6 +26,8 @@
         /// </summary>
         public static readonly Uri BattleNetPatchUri = new Uri("http://us.patch.battle.net:1119");
 
+        public static string BattleNetTriggerDomain => "level3.blizzard.com";
+
         /// <summary>
         /// Downloaded archive indexes, as well as other metadata, are saved into this directory to speedup future prefill runs.
         /// All data in here should be able to be deleted safely.

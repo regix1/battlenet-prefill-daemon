@@ -48,6 +48,10 @@ internal sealed class PrefillRun : IPrefillProgress
         using var cancellation = cancellationToken.Register(() => Progress.TryChooseTerminal("canceled"));
         try
         {
+            // The manager records the address the cache logs for this request as the run's prefill address, which
+            // works in every network setup without the manager knowing which one is in use.
+            await LancacheIpResolver.SendRunProbeAsync(new ApiConsoleAdapter(this), AppConfig.BattleNetTriggerDomain,
+                Progress.Snapshot.OperationId, cancellationToken);
             var result = await api.PrefillAsync(this, cancellationToken);
             Progress.TryChooseTerminal(result.Success ? "completed" : "failed", result.Success ? null : "download-failed");
         }

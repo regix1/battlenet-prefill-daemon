@@ -105,28 +105,5 @@
 
             return parsedRequests;
         }
-
-        public static string GetLatestLogVersionForProduct(string logBasePath, TactProduct product)
-        {
-            var logFolder = $@"{logBasePath}\{product.DisplayNameSanitized}";
-
-            if (!Directory.Exists(logFolder))
-            {
-                Directory.CreateDirectory(logFolder);
-            }
-
-            var latestFile = new DirectoryInfo(logFolder)
-                .GetFiles()
-                .Where(e => e.Extension == ".zip")
-                .OrderByDescending(e => e.LastWriteTime)
-                .FirstOrDefault();
-
-            if (latestFile == null)
-            {
-                return "";
-            }
-
-            return latestFile.Name.Replace(".zip", "");
-        }
     }
 }

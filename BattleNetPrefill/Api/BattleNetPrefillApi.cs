@@ -31,9 +31,10 @@ public sealed class BattleNetPrefillApi : IDisposable
     private bool _isInitialized;
     private bool _isDisposed;
 
-    private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ItemClaims _claims = new();
     private readonly PrefillSettings _settings;
+
+    internal RequestBudget Budget => _settings.Budget;
 
     // Size estimates share their own result cache.
     private readonly SemaphoreSlim _sizePassLock = new SemaphoreSlim(1, 1);
@@ -45,8 +46,6 @@ public sealed class BattleNetPrefillApi : IDisposable
     /// simply never read.
     /// </summary>
     private readonly ConcurrentDictionary<string, long> _downloadSizeCache = new ConcurrentDictionary<string, long>();
-
-    public bool IsPrefilling => !_activeRuns.IsEmpty;
 
     public BattleNetPrefillApi(IPrefillProgress? progress = null, TimeProvider? clock = null)
         : this(progress ?? NullProgress.Instance, AppConfig.Capture(), clock)
@@ -339,7 +338,8 @@ public sealed class BattleNetPrefillApi : IDisposable
     /// <summary>
     /// Status of the currently selected apps, including whether each has been prefilled before.
     /// </summary>
-    public async Task<SelectedAppsStatus> GetSelectedAppsStatusAsync(CancellationToken cancellationToken = default)
+    public async Task<SelectedAppsStatus> GetSelectedAppsStatusAsync(IReadOnlyList<CachedAppInput>? cachedApps,
+        CancellationToken cancellationToken = default)
     {
         ThrowIfNotInitialized();
         ThrowIfDisposed();
@@ -363,7 +363,31 @@ public sealed class BattleNetPrefillApi : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
 
             var product = ResolveProduct(appId);
-            var isUpToDate = HasPrefillMarker(appId);
+            // A manager request carries the list the run decides from, empty included; only a request from an older
+            // manager has no list, and then the container's own markers decide, as before. A new container has no
+            // markers (its cache folder is an anonymous volume), while the manager's cached versions say what the run
+            // will skip. A version that cannot be read, or an id with no product, is never up to date.
+            string? currentVersion = null;
+            if (cachedApps != null && product != null)
+            {
+                try
+                {
+                    var handler = new TactProductHandler(_console, false, NullProgress.Instance,
+                        _settings with { OperationId = Guid.NewGuid().ToString("D"), SkipDownloads = true });
+                    currentVersion = await handler.GetProductRevisionAsync(product, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    _progress.OnLog(LogLevel.Warning,
+                        $"Failed to read the current version for {product.DisplayName}: {exception.Message}");
+                }
+            }
+            var isUpToDate = CachedAppInput.IsUpToDateForStatus(
+                cachedApps, appId, currentVersion ?? string.Empty, HasPrefillMarker(appId));
             long downloadSize = 0;
 
             // Only run the (network-touching) size pass for products that still need downloading.
@@ -410,7 +434,9 @@ public sealed class BattleNetPrefillApi : IDisposable
 
             try
             {
-                var handler = new TactProductHandler(_console, false, NullProgress.Instance,
+                // The caller already decided the product needs downloading; a local marker that the manager's list
+                // overrides must not shrink the estimate to nothing.
+                var handler = new TactProductHandler(_console, true, NullProgress.Instance,
                     _settings with { OperationId = Guid.NewGuid().ToString("D"), SkipDownloads = true });
                 var downloadSize = await handler.GetProductDownloadSizeAsync(product, cancellationToken);
                 _downloadSizeCache[cacheKey] = downloadSize;
@@ -483,7 +509,6 @@ public sealed class BattleNetPrefillApi : IDisposable
             return new PrefillResult { Success = false, ErrorMessage = "No apps selected for prefill" };
         }
 
-        _activeRuns.TryAdd(settings.OperationId, 0);
         var timer = Stopwatch.StartNew();
         var cachedApps = run.Options.CachedApps.ToDictionary(
             app => app.AppId, app => app.Revision, StringComparer.OrdinalIgnoreCase);
@@ -492,84 +517,77 @@ public sealed class BattleNetPrefillApi : IDisposable
         var updated = 0;
         var cached = 0;
         var failed = 0;
-        try
+        foreach (var product in products)
         {
-            foreach (var product in products)
+            cancellationToken.ThrowIfCancellationRequested();
+            var app = new AppDownloadInfo { AppId = product.ProductCode, Name = product.DisplayName };
+            var claim = _claims.TryClaim(settings.OperationId, new[] { product.ProductCode });
+            progress.OnAppStarted(app);
+            if (claim == null)
             {
+                progress.OnAppCompleted(app, AppDownloadResult.Skipped);
+                continue;
+            }
+            run.Hold(claim);
+            try
+            {
+                var failuresBefore = handler.Summary.FailedApps;
+                var cachedBefore = handler.Summary.AlreadyUpToDate;
+                await handler.ProcessProductAsync(product, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
-                var app = new AppDownloadInfo { AppId = product.ProductCode, Name = product.DisplayName };
-                var claim = _claims.TryClaim(settings.OperationId, new[] { product.ProductCode });
-                progress.OnAppStarted(app);
-                if (claim == null)
+                var completedApp = new AppDownloadInfo
                 {
-                    progress.OnAppCompleted(app, AppDownloadResult.Skipped);
-                    continue;
-                }
-                run.Hold(claim);
-                try
-                {
-                    var failuresBefore = handler.Summary.FailedApps;
-                    var cachedBefore = handler.Summary.AlreadyUpToDate;
-                    await handler.ProcessProductAsync(product, cancellationToken);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var completedApp = new AppDownloadInfo
-                    {
-                        AppId = app.AppId,
-                        Name = app.Name,
-                        CacheRevision = handler.LastRevision
-                    };
-                    if (handler.Summary.FailedApps != failuresBefore)
-                    {
-                        failed++;
-                        progress.OnAppCompleted(app, AppDownloadResult.Failed);
-                    }
-                    else if (handler.Summary.AlreadyUpToDate != cachedBefore)
-                    {
-                        cached++;
-                        progress.OnAppCompleted(completedApp, AppDownloadResult.AlreadyUpToDate);
-                    }
-                    else if (!settings.SkipDownloads)
-                    {
-                        updated++;
-                        foreach (var key in _downloadSizeCache.Keys.Where(key =>
-                            key.StartsWith(product.ProductCode + "@", StringComparison.Ordinal)))
-                        {
-                            _downloadSizeCache.TryRemove(key, out _);
-                        }
-                    }
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested
-                    || run.Progress.Terminal?.State == "canceled")
-                {
-                    throw;
-                }
-                catch (Exception exception)
+                    AppId = app.AppId,
+                    Name = app.Name,
+                    CacheRevision = handler.LastRevision
+                };
+                if (handler.Summary.FailedApps != failuresBefore)
                 {
                     failed++;
-                    progress.OnLog(LogLevel.Warning, $"Prefill failed for {product.DisplayName}: {exception.Message}");
                     progress.OnAppCompleted(app, AppDownloadResult.Failed);
                 }
+                else if (handler.Summary.AlreadyUpToDate != cachedBefore)
+                {
+                    cached++;
+                    progress.OnAppCompleted(completedApp, AppDownloadResult.AlreadyUpToDate);
+                }
+                else if (!settings.SkipDownloads)
+                {
+                    updated++;
+                    foreach (var key in _downloadSizeCache.Keys.Where(key =>
+                        key.StartsWith(product.ProductCode + "@", StringComparison.Ordinal)))
+                    {
+                        _downloadSizeCache.TryRemove(key, out _);
+                    }
+                }
             }
-            progress.OnPrefillCompleted(new PrefillSummary
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested
+                || run.Progress.Terminal?.State == "canceled")
             {
-                TotalApps = products.Length,
-                UpdatedApps = updated,
-                AlreadyUpToDate = cached,
-                FailedApps = failed,
-                TotalBytesTransferred = (long)handler.Summary.TotalBytesTransferred.Bytes,
-                TotalTime = timer.Elapsed
-            });
-            return new PrefillResult
+                throw;
+            }
+            catch (Exception exception)
             {
-                Success = failed == 0,
-                ErrorMessage = failed == 0 ? null : $"{failed} product(s) failed to prefill",
-                TotalTime = timer.Elapsed
-            };
+                failed++;
+                progress.OnLog(LogLevel.Warning, $"Prefill failed for {product.DisplayName}: {exception.Message}");
+                progress.OnAppCompleted(app, AppDownloadResult.Failed);
+            }
         }
-        finally
+        progress.OnPrefillCompleted(new PrefillSummary
         {
-            _activeRuns.TryRemove(settings.OperationId, out _);
-        }
+            TotalApps = products.Length,
+            UpdatedApps = updated,
+            AlreadyUpToDate = cached,
+            FailedApps = failed,
+            TotalBytesTransferred = (long)handler.Summary.TotalBytesTransferred.Bytes,
+            TotalTime = timer.Elapsed
+        });
+        return new PrefillResult
+        {
+            Success = failed == 0,
+            ErrorMessage = failed == 0 ? null : $"{failed} product(s) failed to prefill",
+            TotalTime = timer.Elapsed
+        };
     }
 
     internal static TactProduct? ResolveProduct(string appId)
